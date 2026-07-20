@@ -6,3 +6,6 @@ models/insightface_models/
 *.egg-info/
 venv/
 .venv/
+/wheels/
+requirements-core.txt
+entrypoint.sh

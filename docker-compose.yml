@@ -1,26 +1,26 @@
 services:
   ml-service:
     build: .
-    container_name: ml-chege-photos
+    container_name: ${CONTAINER_ML_CHEGE_PHOTOS:-ml-chege-photos}
     ports:
-      - "9051:8000"
+      - "${ML_CHEGE_PHOTOS_API_PORT:-9051}:8000"
     env_file: .env
     volumes:
-      # Shared photo uploads — same directory the CI4 web app writes to
       - "../Chege Photos WebApp/public/uploads:/app/uploads:ro"
+      - insightface_models:/app/models/insightface_models
     depends_on:
-      qdrant:
+      ml-qdrant:
         condition: service_started
     networks:
       - shared-network
     restart: unless-stopped
 
-  qdrant:
+  ml-qdrant:
     image: qdrant/qdrant:latest
-    container_name: ml-qdrant
+    container_name: ${CONTAINER_QDRANT:-ml-qdrant}
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${ML_CHEGE_PHOTOS_QDRANT_HTTP:-9052}:6333"
+      - "${ML_CHEGE_PHOTOS_QDRANT_GRPC:-9053}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     networks:
@@ -29,8 +29,9 @@ services:
 
 volumes:
   qdrant_data:
+  insightface_models:
 
 networks:
   shared-network:
-    name: hosts-shared-network
+    name: ${NETWORK_NAME:-hosts-shared-network}
     external: true
