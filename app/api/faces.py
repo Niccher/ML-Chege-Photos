@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import uuid
 import logging
 from pathlib import Path
@@ -8,15 +7,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
-from qdrant_client.http import models as qdrant_models
+from qdrant_client.models import PointStruct
 
 from sqlalchemy import text
 from app.database import get_db, get_qdrant, FaceEncoding, Person
+from app.models.db import PhotoScan, FaceCluster
 from app.config import settings
 from app.ml.loader import get_face_analysis, get_model_status
+from app.ml.attributes import extract_attributes
+from app.ml import clustering as ml_clustering
+from app.services.face import reclassify_face
 
 log = logging.getLogger("ml_chege_photos.faces")
 router = APIRouter(prefix="/api/v1/faces", tags=["faces"])
@@ -62,9 +63,9 @@ def _face_to_dict(face, idx: int) -> dict:
         }
     if face.embedding is not None:
         d["embedding"] = face.embedding.astype(float).tolist()
-    if settings.include_sensitive_attributes:
-        d["age"] = int(face.age) if hasattr(face, "age") and face.age else None
-        d["gender"] = str(face.gender) if hasattr(face, "gender") and face.gender is not None else None
+    attrs = extract_attributes(face)
+    d["age"] = attrs["age"]
+    d["gender"] = attrs["gender"]
     return d
 
 
@@ -148,6 +149,7 @@ async def encode_photo(
             ],
         )
 
+        attrs = extract_attributes(face)
         fe = FaceEncoding(
             photo_id=photo_id,
             qdrant_point_id=point_id,
@@ -166,8 +168,8 @@ async def encode_photo(
             landmark_right_mouth_x=float(face.kps[4, 0]) if face.kps is not None else None,
             landmark_right_mouth_y=float(face.kps[4, 1]) if face.kps is not None else None,
             detection_score=float(face.det_score),
-            age=int(face.age) if hasattr(face, "age") and face.age else None,
-            gender=str(face.gender) if hasattr(face, "gender") and face.gender is not None else None,
+            age=attrs["age"],
+            gender=attrs["gender"],
         )
         db.add(fe)
         db.flush()
@@ -236,41 +238,25 @@ async def search_faces(
 async def cluster_faces(
     db: Session = Depends(get_db),
 ):
-    from sklearn.cluster import HDBSCAN
-
     qdrant = get_qdrant()
+    vectors, point_ids = ml_clustering.scroll_all_vectors(qdrant, settings.qdrant_collection)
 
-    offset: int | None = None
-    vectors = []
-    point_ids = []
-    while True:
-        points, next_offset = qdrant.scroll(
-            collection_name=settings.qdrant_collection,
-            limit=100,
-            offset=offset,
-            with_vectors=True,
-            with_payload=False,
-        )
-        for p in points:
-            vectors.append(p.vector)
-            point_ids.append(p.id)
-        if next_offset is None:
-            break
-        offset = next_offset
+    result = ml_clustering.run_hdbscan(vectors)
+    labels = result["labels"]
+    n_clusters = result["n_clusters"]
+    noise = result["noise"]
 
-    if len(vectors) < settings.hdbscan_min_cluster_size:
-        return {"clusters": 0, "noise": len(vectors), "message": "Not enough faces to cluster"}
+    if n_clusters == 0:
+        return {
+            "total_faces": len(vectors),
+            "clusters": 0,
+            "noise": noise,
+            "assigned": 0,
+            "message": "Not enough faces to cluster" if noise == len(vectors) else "All faces are noise",
+        }
 
-    X = np.array(vectors)
-    clusterer = HDBSCAN(
-        min_cluster_size=settings.hdbscan_min_cluster_size,
-        min_samples=settings.hdbscan_min_samples,
-        metric=settings.cluster_metric,
-    )
-    labels = clusterer.fit_predict(X)
-
-    label_to_person = {}
     unique_labels = set(labels) - {-1}
+    label_to_person = {}
     for lbl in unique_labels:
         person = Person(cluster_label=int(lbl))
         db.add(person)
@@ -290,11 +276,15 @@ async def cluster_faces(
 
     db.commit()
 
+    centroids = ml_clustering.compute_centroids(vectors, labels)
+    ml_clustering.store_centroids(centroids, label_to_person)
+
     return {
         "total_faces": len(vectors),
-        "clusters": len(unique_labels),
-        "noise": int((labels == -1).sum()),
+        "clusters": n_clusters,
+        "noise": noise,
         "assigned": assigned,
+        "centroids_stored": len(centroids),
     }
 
 
@@ -408,6 +398,113 @@ def merge_persons(
     db.delete(source)
     db.commit()
     return {"merged_into": target_person_id, "deleted_person": source_person_id}
+
+
+@router.post("/delete-by-photo-ids")
+def delete_by_photo_ids(
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    photo_ids = body.get("photo_ids", [])
+    if not photo_ids:
+        raise HTTPException(400, "photo_ids list required")
+
+    faces = db.query(FaceEncoding).filter(
+        FaceEncoding.photo_id.in_(photo_ids)
+    ).all()
+
+    qdrant_points = [f.qdrant_point_id for f in faces]
+    person_ids = list({f.person_id for f in faces if f.person_id is not None})
+
+    # Delete from Qdrant
+    qdrant = get_qdrant()
+    for pid in qdrant_points:
+        try:
+            qdrant.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=[pid],
+            )
+        except Exception:
+            pass
+
+    # Delete face encodings
+    deleted_faces = db.query(FaceEncoding).filter(
+        FaceEncoding.photo_id.in_(photo_ids)
+    ).delete(synchronize_session=False)
+
+    # Delete orphaned persons (and their clusters)
+    deleted_persons = 0
+    centroid_points_removed = 0
+    for pid in person_ids:
+        remaining = db.query(FaceEncoding).filter(
+            FaceEncoding.person_id == pid
+        ).count()
+        if remaining == 0:
+            clusters = db.query(FaceCluster).filter(FaceCluster.person_id == pid).all()
+            for c in clusters:
+                if c.centroid_point_id:
+                    try:
+                        qdrant.delete(
+                            collection_name=settings.qdrant_collection + "_centroids",
+                            points_selector=[c.centroid_point_id],
+                        )
+                        centroid_points_removed += 1
+                    except Exception:
+                        pass
+            db.query(FaceCluster).filter(FaceCluster.person_id == pid).delete()
+            db.query(Person).filter(Person.id == pid).delete()
+            deleted_persons += 1
+
+    # Delete photo scans
+    deleted_scans = db.query(PhotoScan).filter(
+        PhotoScan.photo_id.in_(photo_ids)
+    ).delete(synchronize_session=False)
+
+    db.commit()
+
+    return {
+        "deleted_faces": deleted_faces,
+        "deleted_persons": deleted_persons,
+        "deleted_scans": deleted_scans,
+        "qdrant_points_removed": len(qdrant_points),
+        "centroid_points_removed": centroid_points_removed,
+    }
+
+
+@router.post("/{face_id}/reclassify")
+def reclassify_face_endpoint(
+    face_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = reclassify_face(face_id, db)
+        return {"status": "success", "data": result}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.delete("/reset")
+def reset_faces(
+    db: Session = Depends(get_db),
+):
+    db.query(FaceEncoding).delete()
+    db.query(Person).delete()
+    db.commit()
+
+    qdrant = get_qdrant()
+    collections = qdrant.get_collections().collections
+    existing = {c.name for c in collections}
+    if settings.qdrant_collection in existing:
+        qdrant.delete_collection(collection_name=settings.qdrant_collection)
+
+    from qdrant_client.models import VectorParams, Distance
+    qdrant.create_collection(
+        collection_name=settings.qdrant_collection,
+        vectors_config=VectorParams(size=512, distance=Distance.COSINE),
+    )
+
+    ml_clustering.clear_centroids()
+    return {"status": "success", "message": "All face data deleted, Qdrant collection recreated"}
 
 
 @router.get("/faces/unassigned")
