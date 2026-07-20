@@ -1,0 +1,36 @@
+services:
+  ml-service:
+    build: .
+    container_name: ml-chege-photos
+    ports:
+      - "9051:8000"
+    env_file: .env
+    volumes:
+      # Shared photo uploads — same directory the CI4 web app writes to
+      - "../Chege Photos WebApp/public/uploads:/app/uploads:ro"
+    depends_on:
+      qdrant:
+        condition: service_started
+    networks:
+      - shared-network
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ml-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - shared-network
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+
+networks:
+  shared-network:
+    name: hosts-shared-network
+    external: true

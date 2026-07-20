@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+models/insightface_models/
+.qdrant_storage/
+*.egg-info/
+venv/
+.venv/
