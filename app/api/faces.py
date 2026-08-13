@@ -507,7 +507,7 @@ def reset_faces(
     return {"status": "success", "message": "All face data deleted, Qdrant collection recreated"}
 
 
-@router.get("/faces/unassigned")
+@router.get("/unassigned")
 def unassigned_faces(
     db: Session = Depends(get_db),
 ):

@@ -43,3 +43,21 @@ def health_check():
         "qdrant_connected": qdrant_ok,
         "models_loaded": models_loaded,
     }
+
+
+@router.post("/models/reload")
+def reload_models_endpoint(model_pack: str):
+    """Reload models with a specific model pack."""
+    from app.config import settings
+    from app.ml.loader import load_models
+
+    if model_pack not in ["buffalo_l", "buffalo_m", "buffalo_s", "buffalo_sc"]:
+        return {"status": "error", "message": "Invalid model pack name."}
+
+    settings.face_model_pack = model_pack
+    load_models()
+    return {
+        "status": "success",
+        "model_pack": settings.face_model_pack,
+        "models_loaded": get_model_status()
+    }

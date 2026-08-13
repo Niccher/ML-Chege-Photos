@@ -1,0 +1,13 @@
+.git
+.idea
+.vscode
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+.venv/
+models/
+.qdrant_storage/
+Dockerfile
+docker-compose.yml
