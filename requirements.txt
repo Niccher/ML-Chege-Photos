@@ -12,3 +12,6 @@ hdbscan==0.8.44
 scikit-learn==1.9.0
 opencv-python==5.0.0.93
 Pillow==12.3.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+transformers

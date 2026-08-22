@@ -16,7 +16,10 @@ def extract_attributes(face) -> dict:
 
     if settings.include_sensitive_attributes:
         result["age"] = int(face.age) if hasattr(face, "age") and face.age is not None else None
-        result["gender"] = str(face.gender) if hasattr(face, "gender") and face.gender is not None else None
+        gender_val = None
+        if hasattr(face, "gender") and face.gender is not None:
+            gender_val = "male" if int(face.gender) == 1 else "female"
+        result["gender"] = gender_val
     else:
         result["age"] = None
         result["gender"] = None

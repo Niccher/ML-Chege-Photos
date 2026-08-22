@@ -1,11 +1,38 @@
+# Python caches
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment files
 .env
+.env.*
+!.env.example
+
+# Models & Weights
 models/insightface_models/
+models/
+huggingface/
+.huggingface/
+.cache/
+
+# Databases & Vector DB storage
 .qdrant_storage/
-*.egg-info/
+
+# Virtual Environments
 venv/
 .venv/
+env/
+ENV/
+
+# Python Packaging & Distribution
+*.egg-info/
 /wheels/
 requirements-core.txt
-entrypoint.sh
+
+# OS Files
+.DS_Store
+Thumbs.db

@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     face_model_pack: str = "buffalo_l"
     face_det_thresh: float = 0.5
 
+    # ── CLIP / Semantic Search ──────────────────────────────────
+    clip_model_name: str = "openai/clip-vit-base-patch32"
+    qdrant_photo_collection: str = "photo_embeddings"
+
+    # ── Object Detection ────────────────────────────────────────
+    object_det_threshold: float = 0.5
+
     # ── Sensitive attributes ────────────────────────────────────
     include_sensitive_attributes: bool = False
 
@@ -46,6 +53,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
+
+    # ── Security ────────────────────────────────────────────────
+    ml_api_key: str = "my_super_secret_shared_token_key_123!"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

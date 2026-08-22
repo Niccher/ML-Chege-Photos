@@ -13,7 +13,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 COPY wheels /wheels
-RUN pip install --no-index --find-links /wheels -r requirements.txt && rm -rf /wheels
+RUN pip install --find-links /wheels -r requirements.txt && rm -rf /wheels
 
 COPY . .
 

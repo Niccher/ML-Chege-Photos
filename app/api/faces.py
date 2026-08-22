@@ -99,11 +99,29 @@ async def embed_face(file: UploadFile = File(...)):
 # ── Encode (detect + embed + store in Qdrant + DB) ──────────────
 
 
-@router.post("/encode")
-async def encode_photo(
-    photo_id: int = Form(...),
-    db: Session = Depends(get_db),
-):
+def calculate_iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBAArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+
+    unionArea = float(boxAArea + boxBAArea - interArea)
+    if unionArea == 0:
+        return 0.0
+    return interArea / unionArea
+
+
+def process_photo_pipeline_sync(
+    photo_id: int,
+    scan_faces: bool,
+    scan_tags: bool,
+    scan_clip: bool,
+    db: Session,
+) -> dict:
     model = _require_models()
 
     photo = db.execute(
@@ -123,67 +141,208 @@ async def encode_photo(
     if img is None:
         raise HTTPException(400, "Could not read photo file")
 
-    faces = model.get(img)
-    if not faces:
-        return {"photo_id": photo_id, "face_count": 0, "faces": []}
-
-    qdrant = get_qdrant()
     results = []
 
-    for i, face in enumerate(faces):
-        point_id = str(uuid.uuid4())
+    # 1. Faces Scan
+    if scan_faces:
+        faces = model.get(img)
+        qdrant = get_qdrant()
 
-        qdrant.upsert(
-            collection_name=settings.qdrant_collection,
-            points=[
-                PointStruct(
-                    id=point_id,
-                    vector=face.embedding.astype(float).tolist(),
-                    payload={
-                        "photo_id": photo_id,
-                        "face_index": i,
-                        "bbox": _face_to_dict(face, i)["bbox"],
-                        "detection_score": float(face.det_score),
-                    },
+        # Load existing FaceEncoding records for this photo
+        existing_encodings = db.query(FaceEncoding).filter(FaceEncoding.photo_id == photo_id).all()
+
+        matched_existing_ids = set()
+
+        for i, face in enumerate(faces):
+            new_box = [float(face.bbox[0]), float(face.bbox[1]), float(face.bbox[2]), float(face.bbox[3])]
+
+            best_iou = 0.0
+            best_match = None
+
+            for old_fe in existing_encodings:
+                if old_fe.id in matched_existing_ids:
+                    continue
+                old_box = [
+                    old_fe.bbox_x,
+                    old_fe.bbox_y,
+                    old_fe.bbox_x + old_fe.bbox_w,
+                    old_fe.bbox_y + old_fe.bbox_h
+                ]
+                iou = calculate_iou(new_box, old_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = old_fe
+
+            # Matching threshold 0.50
+            if best_match and best_iou >= 0.50:
+                fe = best_match
+                matched_existing_ids.add(fe.id)
+                point_id = fe.qdrant_point_id
+            else:
+                point_id = str(uuid.uuid4())
+                fe = FaceEncoding(
+                    photo_id=photo_id,
+                    qdrant_point_id=point_id
                 )
-            ],
+                db.add(fe)
+
+            fe.bbox_x = float(face.bbox[0])
+            fe.bbox_y = float(face.bbox[1])
+            fe.bbox_w = float(face.bbox[2] - face.bbox[0])
+            fe.bbox_h = float(face.bbox[3] - face.bbox[1])
+
+            fe.landmark_left_eye_x = float(face.kps[0, 0]) if face.kps is not None else None
+            fe.landmark_left_eye_y = float(face.kps[0, 1]) if face.kps is not None else None
+            fe.landmark_right_eye_x = float(face.kps[1, 0]) if face.kps is not None else None
+            fe.landmark_right_eye_y = float(face.kps[1, 1]) if face.kps is not None else None
+            fe.landmark_nose_x = float(face.kps[2, 0]) if face.kps is not None else None
+            fe.landmark_nose_y = float(face.kps[2, 1]) if face.kps is not None else None
+            fe.landmark_left_mouth_x = float(face.kps[3, 0]) if face.kps is not None else None
+            fe.landmark_left_mouth_y = float(face.kps[3, 1]) if face.kps is not None else None
+            fe.landmark_right_mouth_x = float(face.kps[4, 0]) if face.kps is not None else None
+            fe.landmark_right_mouth_y = float(face.kps[4, 1]) if face.kps is not None else None
+            fe.detection_score = float(face.det_score)
+
+            attrs = extract_attributes(face)
+            if not fe.id or not fe.gender:
+                fe.gender = attrs["gender"]
+            if not fe.id or not fe.age:
+                fe.age = attrs["age"]
+
+            db.flush()
+
+            # Upsert vector
+            qdrant.upsert(
+                collection_name=settings.qdrant_collection,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=face.embedding.astype(float).tolist(),
+                        payload={
+                            "photo_id": photo_id,
+                            "face_index": i,
+                            "bbox": _face_to_dict(face, i)["bbox"],
+                            "detection_score": float(face.det_score),
+                        },
+                    )
+                ],
+            )
+
+            results.append({
+                "face_id": fe.id,
+                "qdrant_point_id": point_id,
+                "bbox": _face_to_dict(face, i)["bbox"],
+                "detection_score": float(face.det_score),
+                "embedding": face.embedding.astype(float).tolist(),
+            })
+
+        # Delete any old FaceEncoding records that were NOT matched
+        for old_fe in existing_encodings:
+            if old_fe.id not in matched_existing_ids:
+                db.delete(old_fe)
+                try:
+                    qdrant.delete(
+                        collection_name=settings.qdrant_collection,
+                        points_selector=[old_fe.qdrant_point_id]
+                    )
+                except Exception as q_exc:
+                    log.warning(f"Could not delete point {old_fe.qdrant_point_id} from Qdrant: {q_exc}")
+
+        db.execute(
+            text("UPDATE db_chege_photos.photos SET scanned_face = 1 WHERE id = :pid"),
+            {"pid": photo_id}
         )
 
-        attrs = extract_attributes(face)
-        fe = FaceEncoding(
-            photo_id=photo_id,
-            qdrant_point_id=point_id,
-            bbox_x=float(face.bbox[0]),
-            bbox_y=float(face.bbox[1]),
-            bbox_w=float(face.bbox[2] - face.bbox[0]),
-            bbox_h=float(face.bbox[3] - face.bbox[1]),
-            landmark_left_eye_x=float(face.kps[0, 0]) if face.kps is not None else None,
-            landmark_left_eye_y=float(face.kps[0, 1]) if face.kps is not None else None,
-            landmark_right_eye_x=float(face.kps[1, 0]) if face.kps is not None else None,
-            landmark_right_eye_y=float(face.kps[1, 1]) if face.kps is not None else None,
-            landmark_nose_x=float(face.kps[2, 0]) if face.kps is not None else None,
-            landmark_nose_y=float(face.kps[2, 1]) if face.kps is not None else None,
-            landmark_left_mouth_x=float(face.kps[3, 0]) if face.kps is not None else None,
-            landmark_left_mouth_y=float(face.kps[3, 1]) if face.kps is not None else None,
-            landmark_right_mouth_x=float(face.kps[4, 0]) if face.kps is not None else None,
-            landmark_right_mouth_y=float(face.kps[4, 1]) if face.kps is not None else None,
-            detection_score=float(face.det_score),
-            age=attrs["age"],
-            gender=attrs["gender"],
-        )
-        db.add(fe)
-        db.flush()
+    # 2. Object Detection (YOLOv8)
+    if scan_tags:
+        try:
+            from app.ml import object_detection
+            from app.database import PhotoTag
+            tags = object_detection.detect_objects(str(photo_path))
+            db.query(PhotoTag).filter(PhotoTag.photo_id == photo_id).delete()
+            for t in tags:
+                pt = PhotoTag(
+                    photo_id=photo_id,
+                    tag=t["tag"],
+                    confidence=t["confidence"]
+                )
+                db.add(pt)
+            db.execute(
+                text("UPDATE db_chege_photos.photos SET scanned_tag = 1 WHERE id = :pid"),
+                {"pid": photo_id}
+            )
+        except Exception as exc:
+            log.error("Object detection failed for photo %d: %s", photo_id, exc)
 
-        results.append({
-            "face_id": fe.id,
-            "qdrant_point_id": point_id,
-            "bbox": _face_to_dict(face, i)["bbox"],
-            "detection_score": float(face.det_score),
-            "embedding": face.embedding.astype(float).tolist(),
-        })
+    # 3. Semantic Search (CLIP)
+    if scan_clip:
+        try:
+            from app.ml import semantic_search
+            clip_emb = semantic_search.encode_image(str(photo_path))
+            qdrant = get_qdrant()
+            qdrant.upsert(
+                collection_name=settings.qdrant_photo_collection,
+                points=[PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=clip_emb,
+                    payload={"photo_id": photo_id}
+                )]
+            )
+            db.execute(
+                text("UPDATE db_chege_photos.photos SET scanned_clip = 1 WHERE id = :pid"),
+                {"pid": photo_id}
+            )
+        except Exception as exc:
+            log.error("CLIP embedding failed for photo %d: %s", photo_id, exc)
 
     db.commit()
     return {"photo_id": photo_id, "face_count": len(results), "faces": results}
+
+
+def process_photo_pipeline_queued(photo_id: int, scan_faces: bool, scan_tags: bool, scan_clip: bool):
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        process_photo_pipeline_sync(
+            photo_id=photo_id,
+            scan_faces=scan_faces,
+            scan_tags=scan_tags,
+            scan_clip=scan_clip,
+            db=db
+        )
+    except Exception as e:
+        log.error(f"Failed to run queued photo pipeline for photo {photo_id}: {e}", exc_info=True)
+    finally:
+        db.close()
+
+
+@router.post("/encode")
+async def encode_photo(
+    photo_id: int = Form(...),
+    scan_faces: bool = Form(True),
+    scan_tags: bool = Form(True),
+    scan_clip: bool = Form(True),
+    async_task: bool = Form(False),
+    db: Session = Depends(get_db),
+):
+    if async_task:
+        from app.ml.queue import ml_job_queue
+        await ml_job_queue.add_job(
+            process_photo_pipeline_queued,
+            photo_id=photo_id,
+            scan_faces=scan_faces,
+            scan_tags=scan_tags,
+            scan_clip=scan_clip
+        )
+        return {"status": "queued", "photo_id": photo_id}
+    else:
+        return process_photo_pipeline_sync(
+            photo_id=photo_id,
+            scan_faces=scan_faces,
+            scan_tags=scan_tags,
+            scan_clip=scan_clip,
+            db=db
+        )
 
 
 # ── Search ──────────────────────────────────────────────────────
@@ -236,12 +395,47 @@ async def search_faces(
 
 @router.post("/cluster")
 async def cluster_faces(
+    min_cluster_size: int | None = Query(None, description="HDBSCAN min_cluster_size override"),
+    min_samples: int | None = Query(None, description="HDBSCAN min_samples override"),
     db: Session = Depends(get_db),
 ):
     qdrant = get_qdrant()
+    # Scroll all vectors
     vectors, point_ids = ml_clustering.scroll_all_vectors(qdrant, settings.qdrant_collection)
 
-    result = ml_clustering.run_hdbscan(vectors)
+    # 1. Fetch point IDs of unlocked faces (unassigned or assigned to unnamed persons)
+    unlocked_rows = db.execute(
+        text(
+            "SELECT fe.qdrant_point_id FROM face_encoding fe "
+            "LEFT JOIN person p ON fe.person_id = p.id "
+            "WHERE fe.person_id IS NULL OR p.name IS NULL OR p.name = ''"
+        )
+    ).fetchall()
+    unlocked_ids = {r[0] for r in unlocked_rows}
+
+    # Filter vectors and point_ids to keep only unlocked ones
+    filtered_vectors = []
+    filtered_point_ids = []
+    for vec, pid in zip(vectors, point_ids):
+        if pid in unlocked_ids:
+            filtered_vectors.append(vec)
+            filtered_point_ids.append(pid)
+
+    if not filtered_vectors:
+        return {
+            "total_faces": len(vectors),
+            "clusters": 0,
+            "noise": 0,
+            "assigned": 0,
+            "message": "No unlocked faces available for clustering",
+        }
+
+    # 2. Delete unnamed person profiles to prevent orphaned database records
+    db.execute(text("DELETE FROM person WHERE name IS NULL OR name = ''"))
+    db.commit()
+
+    # 3. Run HDBSCAN on unlocked vectors
+    result = ml_clustering.run_hdbscan(filtered_vectors, min_cluster_size, min_samples)
     labels = result["labels"]
     n_clusters = result["n_clusters"]
     noise = result["noise"]
@@ -252,7 +446,7 @@ async def cluster_faces(
             "clusters": 0,
             "noise": noise,
             "assigned": 0,
-            "message": "Not enough faces to cluster" if noise == len(vectors) else "All faces are noise",
+            "message": "Not enough faces to cluster" if noise == len(filtered_vectors) else "All faces are noise",
         }
 
     unique_labels = set(labels) - {-1}
@@ -264,7 +458,7 @@ async def cluster_faces(
         label_to_person[lbl] = person.id
 
     assigned = 0
-    for point_id, lbl in zip(point_ids, labels):
+    for point_id, lbl in zip(filtered_point_ids, labels):
         if lbl == -1:
             continue
         fe = db.query(FaceEncoding).filter(
@@ -276,11 +470,13 @@ async def cluster_faces(
 
     db.commit()
 
-    centroids = ml_clustering.compute_centroids(vectors, labels)
+    # Calculate centroids on filtered sets and record in Qdrant
+    centroids = ml_clustering.compute_centroids(filtered_vectors, labels)
     ml_clustering.store_centroids(centroids, label_to_person)
 
     return {
         "total_faces": len(vectors),
+        "unlocked_faces": len(filtered_vectors),
         "clusters": n_clusters,
         "noise": noise,
         "assigned": assigned,
@@ -454,6 +650,30 @@ def delete_by_photo_ids(
             db.query(FaceCluster).filter(FaceCluster.person_id == pid).delete()
             db.query(Person).filter(Person.id == pid).delete()
             deleted_persons += 1
+
+    # Delete photo tags
+    try:
+        from app.database import PhotoTag
+        db.query(PhotoTag).filter(PhotoTag.photo_id.in_(photo_ids)).delete(synchronize_session=False)
+    except Exception as exc:
+        log.warning("Failed to delete photo tags: %s", exc)
+
+    # Delete photo embeddings
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
+        qdrant.delete(
+            collection_name=settings.qdrant_photo_collection,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="photo_id",
+                        match=MatchAny(any=photo_ids)
+                    )
+                ]
+            )
+        )
+    except Exception:
+        pass
 
     # Delete photo scans
     deleted_scans = db.query(PhotoScan).filter(

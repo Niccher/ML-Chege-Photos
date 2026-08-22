@@ -304,11 +304,12 @@ All endpoints prefixed with `/api/v1/faces` unless noted.
 | `GET` | `/api/v1/scan/{photo_id}/status` | Poll scan status for a photo |
 | `POST` | `/api/v1/scan` | Start batch scan (with optional photo_ids filter) |
 | `GET` | `/api/v1/scan/batch/{job_id}/status` | Poll batch scan job status |
-| `GET` | `/api/v1/clusters` | List all face clusters |
+| `GET` | `/api/v1/clusters` | Get all face clusters |
 | `GET` | `/api/v1/clusters/{id}` | Get cluster details |
 | `POST` | `/api/v1/clusters/{id}/merge` | Merge source cluster into target |
 | `POST` | `/api/v1/clusters/{id}/split` | Split cluster into sub-clusters |
 | `POST` | `/models/reload` | Dynamically reload model pack weights in memory without container restarts |
+| `GET` | `/api/v1/search/semantic` | Query photos using natural language text search (CLIP) |
 
 ---
 
@@ -325,11 +326,15 @@ ML Chege Photos/
 │   │   ├── health.py        # GET /health endpoint
 │   │   ├── faces.py         # 13 face endpoints (detect, embed, encode, search, cluster, ...)
 │   │   ├── scan.py          # Scan orchestration endpoints
-│   │   └── clusters.py      # Cluster CRUD + merge/split endpoints
+│   │   ├── clusters.py      # Cluster CRUD + merge/split endpoints
+│   │   └── search.py        # Semantic search endpoints (CLIP)
 │   ├── ml/
 │   │   ├── loader.py        # Insightface model loading (GPU → CPU fallback)
 │   │   ├── attributes.py    # Age / gender extraction
-│   │   └── clustering.py    # HDBSCAN, centroid compute/store/clear
+│   │   ├── clustering.py    # HDBSCAN, centroid compute/store/clear
+│   │   ├── object_detection.py # YOLOv8 object detection via OpenCV DNN
+│   │   ├── semantic_search.py # CLIP model text/image embedding generator
+│   │   └── queue.py         # JobQueue async background execution runner
 │   ├── models/
 │   │   ├── db.py            # PhotoScan, ScanJob, FaceCluster ORM models
 │   │   └── schemas.py       # Pydantic request/response models

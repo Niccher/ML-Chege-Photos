@@ -57,9 +57,12 @@ def scroll_all_vectors(qdrant, collection: str):
     return vectors, point_ids
 
 
-def run_hdbscan(vectors: list) -> dict:
+def run_hdbscan(vectors: list, min_cluster_size: int | None = None, min_samples: int | None = None) -> dict:
     n = len(vectors)
-    if n < settings.hdbscan_min_cluster_size:
+    mcs = min_cluster_size if min_cluster_size is not None else settings.hdbscan_min_cluster_size
+    ms = min_samples if min_samples is not None else settings.hdbscan_min_samples
+
+    if n < mcs:
         return {
             "labels": [-1] * n,
             "n_clusters": 0,
@@ -68,8 +71,8 @@ def run_hdbscan(vectors: list) -> dict:
 
     X = np.array(vectors)
     clusterer = HDBSCAN(
-        min_cluster_size=settings.hdbscan_min_cluster_size,
-        min_samples=settings.hdbscan_min_samples,
+        min_cluster_size=mcs,
+        min_samples=ms,
         metric=settings.cluster_metric,
     )
     labels = clusterer.fit_predict(X)

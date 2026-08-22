@@ -76,6 +76,16 @@ class Person(Base):
                          foreign_keys=[FaceEncoding.person_id])
 
 
+class PhotoTag(Base):
+    __tablename__ = "photo_tags"
+
+    id = Column(Integer, primary_key=True)
+    photo_id = Column(Integer, nullable=False, index=True)
+    tag = Column(String(100), nullable=False, index=True)
+    confidence = Column(Float, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 # ── Qdrant ──────────────────────────────────────────────────────
 
 _qdrant_client: QdrantClient | None = None
@@ -100,10 +110,16 @@ def ensure_qdrant_collection():
     collections = client.get_collections().collections
     existing = {c.name for c in collections}
 
-    if settings.qdrant_collection not in existing:
-        from qdrant_client.models import VectorParams, Distance
+    from qdrant_client.models import VectorParams, Distance
 
+    if settings.qdrant_collection not in existing:
         client.create_collection(
             collection_name=settings.qdrant_collection,
+            vectors_config=VectorParams(size=512, distance=Distance.COSINE),
+        )
+
+    if settings.qdrant_photo_collection not in existing:
+        client.create_collection(
+            collection_name=settings.qdrant_photo_collection,
             vectors_config=VectorParams(size=512, distance=Distance.COSINE),
         )
