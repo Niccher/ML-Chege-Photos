@@ -135,3 +135,64 @@ def clear_centroids():
         vectors_config=VectorParams(size=512, distance=Distance.COSINE),
     )
     log.info("Cleared centroid collection")
+
+
+# ── Incremental clustering helpers ──────────────────────────────
+
+def count_unassigned(qdrant) -> int:
+    """Return number of face vectors in the centroid collection — used
+    to decide when to trigger a full HDBSCAN sweep."""
+    try:
+        info = qdrant.get_collection(collection_name=centroid_collection())
+        return info.points_count or 0
+    except Exception:
+        return 0
+
+
+def assign_new_faces(
+    qdrant,
+    new_vectors: list[list[float]],
+    new_point_ids: list[str],
+    confidence_threshold: float = 0.80,
+) -> dict[str, int | None]:
+    """Fast centroid-based assignment for newly scanned face embeddings.
+
+    For each new face vector, the nearest centroid in the centroid collection
+    is searched. If the cosine similarity score exceeds *confidence_threshold*
+    the face is immediately assigned to that centroid's ``person_id``; otherwise
+    it is left unassigned (returns ``None``) to be picked up by the next full
+    HDBSCAN run.
+
+    Returns a mapping of ``{qdrant_point_id: person_id | None}``.
+    """
+    col = centroid_collection()
+    assignments: dict[str, int | None] = {}
+
+    try:
+        centroid_count = qdrant.get_collection(collection_name=col).points_count or 0
+    except Exception:
+        centroid_count = 0
+
+    if centroid_count == 0:
+        # No centroids yet — nothing to assign against
+        return {pid: None for pid in new_point_ids}
+
+    for vec, pid in zip(new_vectors, new_point_ids):
+        hits = qdrant.search(
+            collection_name=col,
+            query_vector=vec,
+            limit=1,
+            with_payload=True,
+        )
+        if hits and hits[0].score >= confidence_threshold:
+            assignments[pid] = hits[0].payload.get("person_id")
+        else:
+            assignments[pid] = None
+
+    assigned = sum(1 for v in assignments.values() if v is not None)
+    log.info(
+        "Incremental assignment: %d/%d faces matched centroid (threshold=%.2f)",
+        assigned, len(new_point_ids), confidence_threshold,
+    )
+    return assignments
+

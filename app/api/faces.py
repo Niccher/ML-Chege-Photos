@@ -12,7 +12,7 @@ from qdrant_client.models import PointStruct
 
 from sqlalchemy import text
 from app.database import get_db, get_qdrant, FaceEncoding, Person
-from app.models.db import PhotoScan, FaceCluster
+from app.models.db import PhotoScan, FaceCluster, FaceAnnotation
 from app.config import settings
 from app.ml.loader import get_face_analysis, get_model_status
 from app.ml.attributes import extract_attributes
@@ -125,11 +125,12 @@ def process_photo_pipeline_sync(
     model = _require_models()
 
     photo = db.execute(
-        text("SELECT id, path FROM db_chege_photos.photos WHERE id = :pid"),
+        text("SELECT id, path, user_id FROM db_chege_photos.photos WHERE id = :pid"),
         {"pid": photo_id},
     ).fetchone()
     if not photo:
         raise HTTPException(404, "Photo not found")
+    user_id = photo.user_id if hasattr(photo, "user_id") else (photo[2] if len(photo) > 2 else None)
 
     # DB stores path as "uploads/filename"; mount is already at /app/uploads
     rel = photo.path.removeprefix("uploads/")
@@ -145,7 +146,24 @@ def process_photo_pipeline_sync(
 
     # 1. Faces Scan
     if scan_faces:
-        faces = model.get(img)
+        all_faces = model.get(img)
+
+        # Non-face filtering: skip low-confidence detections and tiny crops
+        # that are likely false positives (patterns, paintings, icons).
+        MIN_DET_SCORE = settings.face_det_thresh
+        MIN_FACE_PX   = 30  # minimum face width/height in pixels
+        faces = []
+        for f in all_faces:
+            w = float(f.bbox[2] - f.bbox[0])
+            h = float(f.bbox[3] - f.bbox[1])
+            if float(f.det_score) >= MIN_DET_SCORE and w >= MIN_FACE_PX and h >= MIN_FACE_PX:
+                faces.append(f)
+            else:
+                log.debug(
+                    "Skipping false-positive face: score=%.3f w=%.0f h=%.0f",
+                    float(f.det_score), w, h
+                )
+
         qdrant = get_qdrant()
 
         # Load existing FaceEncoding records for this photo
@@ -202,6 +220,7 @@ def process_photo_pipeline_sync(
             fe.landmark_right_mouth_x = float(face.kps[4, 0]) if face.kps is not None else None
             fe.landmark_right_mouth_y = float(face.kps[4, 1]) if face.kps is not None else None
             fe.detection_score = float(face.det_score)
+            fe.model_version    = settings.face_model_pack  # track which model produced this embedding
 
             attrs = extract_attributes(face)
             if not fe.id or not fe.gender:
@@ -220,6 +239,7 @@ def process_photo_pipeline_sync(
                         vector=face.embedding.astype(float).tolist(),
                         payload={
                             "photo_id": photo_id,
+                            "user_id": int(user_id) if user_id is not None else None,
                             "face_index": i,
                             "bbox": _face_to_dict(face, i)["bbox"],
                             "detection_score": float(face.det_score),
@@ -285,7 +305,10 @@ def process_photo_pipeline_sync(
                 points=[PointStruct(
                     id=str(uuid.uuid4()),
                     vector=clip_emb,
-                    payload={"photo_id": photo_id}
+                    payload={
+                        "photo_id": photo_id,
+                        "user_id": int(user_id) if user_id is not None else None,
+                    }
                 )]
             )
             db.execute(
@@ -352,6 +375,8 @@ async def encode_photo(
 async def search_faces(
     file: UploadFile = File(...),
     limit: int = Query(20, ge=1, le=100),
+    user_id: int | None = Query(None, description="Restrict results to this user's faces only"),
+    min_det_score: float = Query(0.85, description="Minimum RetinaFace detection score to consider"),
     db: Session = Depends(get_db),
 ):
     model = _require_models()
@@ -360,11 +385,31 @@ async def search_faces(
     if not faces:
         raise HTTPException(404, "No face detected")
 
-    query_vec = faces[0].embedding.astype(float).tolist()
+    # Non-face filtering: only accept high-confidence detections
+    confident_faces = [f for f in faces if float(f.det_score) >= min_det_score]
+    if not confident_faces:
+        raise HTTPException(404, f"No face with detection score ≥ {min_det_score} found (got scores: {[round(float(f.det_score), 3) for f in faces]})")
+
+    query_vec = confident_faces[0].embedding.astype(float).tolist()
     qdrant = get_qdrant()
+
+    # Build optional user_id filter to ensure cross-user privacy
+    query_filter = None
+    if user_id is not None:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        query_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="user_id",
+                    match=MatchValue(value=user_id)
+                )
+            ]
+        )
+
     hits = qdrant.search(
         collection_name=settings.qdrant_collection,
         query_vector=query_vec,
+        query_filter=query_filter,
         limit=limit,
         with_payload=True,
     )
@@ -395,54 +440,142 @@ async def search_faces(
 
 @router.post("/cluster")
 async def cluster_faces(
+    mode: str = Query(
+        "incremental",
+        description="'incremental' = centroid fast-assign then HDBSCAN only if threshold exceeded; 'full' = always full HDBSCAN",
+    ),
     min_cluster_size: int | None = Query(None, description="HDBSCAN min_cluster_size override"),
     min_samples: int | None = Query(None, description="HDBSCAN min_samples override"),
     db: Session = Depends(get_db),
 ):
     qdrant = get_qdrant()
-    # Scroll all vectors
     vectors, point_ids = ml_clustering.scroll_all_vectors(qdrant, settings.qdrant_collection)
 
-    # 1. Fetch point IDs of unlocked faces (unassigned or assigned to unnamed persons)
-    unlocked_rows = db.execute(
+    # ── Load pinned annotations (Human-in-the-Loop) ─────────────
+    # 'confirm' annotations are hard constraints: the face stays pinned to its
+    # person and is excluded from HDBSCAN re-assignment entirely.
+    pinned_confirm_rows = db.execute(
         text(
-            "SELECT fe.qdrant_point_id FROM face_encoding fe "
-            "LEFT JOIN person p ON fe.person_id = p.id "
-            "WHERE fe.person_id IS NULL OR p.name IS NULL OR p.name = ''"
+            "SELECT fa.face_encoding_id, fa.person_id "
+            "FROM face_annotation fa WHERE fa.action = 'confirm'"
         )
     ).fetchall()
-    unlocked_ids = {r[0] for r in unlocked_rows}
+    pinned_face_ids: dict[int, int] = {r[0]: r[1] for r in pinned_confirm_rows}
 
-    # Filter vectors and point_ids to keep only unlocked ones
-    filtered_vectors = []
-    filtered_point_ids = []
-    for vec, pid in zip(vectors, point_ids):
-        if pid in unlocked_ids:
-            filtered_vectors.append(vec)
-            filtered_point_ids.append(pid)
+    # 'reject' annotations: face must NOT be assigned to a specific person.
+    reject_rows = db.execute(
+        text(
+            "SELECT fa.face_encoding_id, fa.person_id "
+            "FROM face_annotation fa WHERE fa.action = 'reject'"
+        )
+    ).fetchall()
+    # Maps face_encoding_id -> set of forbidden person_ids
+    rejected_persons: dict[int, set[int]] = {}
+    for r in reject_rows:
+        rejected_persons.setdefault(r[0], set()).add(r[1])
+
+    # Apply confirmed pins first — set person_id directly, skip HDBSCAN for these
+    pinned_qdrant_ids: set[str] = set()
+    for fe_db_id, person_id in pinned_face_ids.items():
+        fe = db.query(FaceEncoding).filter(FaceEncoding.id == fe_db_id).first()
+        if fe:
+            fe.person_id = person_id
+            pinned_qdrant_ids.add(fe.qdrant_point_id)
+    if pinned_face_ids:
+        db.commit()
+
+    # ── 1. Fetch unlocked faces (unassigned or with unnamed person, not pinned) ─
+    unlocked_rows = db.execute(
+        text(
+            "SELECT fe.qdrant_point_id, fe.id FROM face_encoding fe "
+            "LEFT JOIN person p ON fe.person_id = p.id "
+            "WHERE (fe.person_id IS NULL OR p.name IS NULL OR p.name = '')"
+        )
+    ).fetchall()
+    unlocked_ids = {r[0] for r in unlocked_rows if r[0] not in pinned_qdrant_ids}
+
+    # ── 2. Incremental fast-assign via centroid proximity ────────
+    incremental_assigned = 0
+    if mode == "incremental":
+        new_vectors = [v for v, pid in zip(vectors, point_ids) if pid in unlocked_ids]
+        new_pids    = [pid for pid in point_ids if pid in unlocked_ids]
+
+        if new_vectors:
+            assignments = ml_clustering.assign_new_faces(
+                qdrant, new_vectors, new_pids,
+                confidence_threshold=settings.incremental_centroid_threshold,
+            )
+            for pid, person_id in assignments.items():
+                if person_id is None:
+                    continue
+                fe = db.query(FaceEncoding).filter(
+                    FaceEncoding.qdrant_point_id == pid
+                ).first()
+                if not fe:
+                    continue
+                # Honour reject annotations
+                if fe.id in rejected_persons and person_id in rejected_persons[fe.id]:
+                    continue
+                fe.person_id = person_id
+                unlocked_ids.discard(pid)   # no longer needs full HDBSCAN
+                incremental_assigned += 1
+
+            db.commit()
+
+    # ── 3. Decide whether to run full HDBSCAN ────────────────────
+    remaining_unlocked = len(unlocked_ids)
+    run_full = (
+        mode == "full"
+        or remaining_unlocked >= settings.incremental_unassigned_trigger
+    )
+
+    if not run_full:
+        return {
+            "mode": mode,
+            "total_faces": len(vectors),
+            "incremental_assigned": incremental_assigned,
+            "unassigned_remaining": remaining_unlocked,
+            "full_hdbscan_run": False,
+            "message": (
+                f"Incremental assignment complete. "
+                f"{remaining_unlocked} face(s) pending full sweep "
+                f"(trigger={settings.incremental_unassigned_trigger})."
+            ),
+        }
+
+    # ── 4. Full HDBSCAN on remaining unlocked faces ──────────────
+    filtered_vectors  = [v for v, pid in zip(vectors, point_ids) if pid in unlocked_ids]
+    filtered_pids     = [pid for pid in point_ids if pid in unlocked_ids]
 
     if not filtered_vectors:
         return {
+            "mode": mode,
             "total_faces": len(vectors),
+            "incremental_assigned": incremental_assigned,
+            "unassigned_remaining": 0,
+            "full_hdbscan_run": True,
             "clusters": 0,
             "noise": 0,
             "assigned": 0,
-            "message": "No unlocked faces available for clustering",
+            "message": "No unlocked faces remain for HDBSCAN",
         }
 
-    # 2. Delete unnamed person profiles to prevent orphaned database records
+    # Detach face encodings from unnamed persons before deleting them to satisfy foreign keys
+    db.execute(text("UPDATE face_encoding fe JOIN person p ON fe.person_id = p.id SET fe.person_id = NULL WHERE p.name IS NULL OR p.name = ''"))
     db.execute(text("DELETE FROM person WHERE name IS NULL OR name = ''"))
     db.commit()
 
-    # 3. Run HDBSCAN on unlocked vectors
-    result = ml_clustering.run_hdbscan(filtered_vectors, min_cluster_size, min_samples)
-    labels = result["labels"]
+    result    = ml_clustering.run_hdbscan(filtered_vectors, min_cluster_size, min_samples)
+    labels    = result["labels"]
     n_clusters = result["n_clusters"]
-    noise = result["noise"]
+    noise      = result["noise"]
 
     if n_clusters == 0:
         return {
+            "mode": mode,
             "total_faces": len(vectors),
+            "incremental_assigned": incremental_assigned,
+            "full_hdbscan_run": True,
             "clusters": 0,
             "noise": noise,
             "assigned": 0,
@@ -450,36 +583,42 @@ async def cluster_faces(
         }
 
     unique_labels = set(labels) - {-1}
-    label_to_person = {}
+    label_to_person: dict[int, int] = {}
     for lbl in unique_labels:
         person = Person(cluster_label=int(lbl))
         db.add(person)
         db.flush()
         label_to_person[lbl] = person.id
 
-    assigned = 0
-    for point_id, lbl in zip(filtered_point_ids, labels):
+    hdbscan_assigned = 0
+    for pid, lbl in zip(filtered_pids, labels):
         if lbl == -1:
             continue
-        fe = db.query(FaceEncoding).filter(
-            FaceEncoding.qdrant_point_id == point_id
-        ).first()
-        if fe:
-            fe.person_id = label_to_person[lbl]
-            assigned += 1
+        fe = db.query(FaceEncoding).filter(FaceEncoding.qdrant_point_id == pid).first()
+        if not fe:
+            continue
+        candidate_person = label_to_person[lbl]
+        # Honour reject annotations
+        if fe.id in rejected_persons and candidate_person in rejected_persons[fe.id]:
+            continue
+        fe.person_id = candidate_person
+        hdbscan_assigned += 1
 
     db.commit()
 
-    # Calculate centroids on filtered sets and record in Qdrant
     centroids = ml_clustering.compute_centroids(filtered_vectors, labels)
     ml_clustering.store_centroids(centroids, label_to_person)
 
     return {
+        "mode": mode,
         "total_faces": len(vectors),
+        "pinned_faces": len(pinned_face_ids),
+        "incremental_assigned": incremental_assigned,
+        "full_hdbscan_run": True,
         "unlocked_faces": len(filtered_vectors),
         "clusters": n_clusters,
         "noise": noise,
-        "assigned": assigned,
+        "assigned": hdbscan_assigned,
         "centroids_stored": len(centroids),
     }
 
@@ -746,3 +885,99 @@ def unassigned_faces(
             for f in faces
         ],
     }
+
+
+# ── Human-in-the-Loop Refinements ────────────────────────────────
+
+@router.post("/{face_id}/annotate")
+def annotate_face(
+    face_id: int,
+    person_id: int = Form(...),
+    action: str = Form(..., description="'confirm' to lock face to person; 'reject' to disallow the assignment"),
+    annotated_by: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    if action not in ("confirm", "reject"):
+        raise HTTPException(400, "Action must be either 'confirm' or 'reject'")
+
+    fe = db.query(FaceEncoding).filter(FaceEncoding.id == face_id).first()
+    if not fe:
+        raise HTTPException(404, "FaceEncoding not found")
+
+    person = db.query(Person).filter(Person.id == person_id).first()
+    if not person:
+        raise HTTPException(404, "Person not found")
+
+    # Check if this annotation already exists
+    ann = db.query(FaceAnnotation).filter(
+        FaceAnnotation.face_encoding_id == face_id,
+        FaceAnnotation.person_id == person_id
+    ).first()
+
+    if not ann:
+        ann = FaceAnnotation(
+            face_encoding_id=face_id,
+            person_id=person_id,
+            action=action,
+            annotated_by=annotated_by
+        )
+        db.add(ann)
+    else:
+        ann.action = action
+        ann.annotated_by = annotated_by
+
+    # For confirm, immediately update the face's person_id mapping
+    if action == "confirm":
+        fe.person_id = person_id
+    elif action == "reject" and fe.person_id == person_id:
+        # If rejected, unassign it if it was assigned to this person
+        fe.person_id = None
+
+    db.commit()
+    return {
+        "status": "success",
+        "face_id": face_id,
+        "person_id": person_id,
+        "action": action,
+        "assigned_person_id": fe.person_id,
+    }
+
+
+@router.delete("/{face_id}/annotate/{person_id}")
+def remove_annotation(
+    face_id: int,
+    person_id: int,
+    db: Session = Depends(get_db),
+):
+    ann = db.query(FaceAnnotation).filter(
+        FaceAnnotation.face_encoding_id == face_id,
+        FaceAnnotation.person_id == person_id
+    ).first()
+
+    if not ann:
+        raise HTTPException(404, "Annotation not found")
+
+    db.delete(ann)
+    db.commit()
+    return {"status": "success", "message": "Annotation removed successfully"}
+
+
+@router.get("/{face_id}/annotations")
+def get_face_annotations(
+    face_id: int,
+    db: Session = Depends(get_db),
+):
+    annotations = db.query(FaceAnnotation).filter(FaceAnnotation.face_encoding_id == face_id).all()
+    return {
+        "face_id": face_id,
+        "annotations": [
+            {
+                "person_id": a.person_id,
+                "action": a.action,
+                "annotated_by": a.annotated_by,
+                "created_at": str(a.created_at) if a.created_at else None,
+            }
+            for a in annotations
+        ]
+    }
+

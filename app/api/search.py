@@ -15,14 +15,29 @@ router = APIRouter(prefix="/api/v1/search", tags=["search"])
 def semantic_search_endpoint(
     query: str = Query(..., description="Natural language query"),
     limit: int = Query(20, ge=1, le=100),
+    user_id: int | None = Query(None),
 ):
     try:
         query_vec = semantic_search.encode_text(query)
         qdrant = get_qdrant()
+        
+        query_filter = None
+        if user_id is not None:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=user_id)
+                    )
+                ]
+            )
+
         hits = qdrant.search(
             collection_name=settings.qdrant_photo_collection,
             query_vector=query_vec,
             limit=limit,
+            query_filter=query_filter,
             with_payload=True,
         )
         results = []

@@ -41,3 +41,30 @@ class FaceCluster(Base):
     merged_from = Column(JSON, nullable=True)
     split_from = Column(Integer, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class FaceAnnotation(Base):
+    """Human-in-the-loop refinement: a user's confirmed or rejected assignment
+    of a face to a person. Rows with action='confirm' act as hard constraints
+    during clustering (the face is pinned to that person and never moved).
+    Rows with action='reject' prevent the face from being re-assigned to that
+    person by future HDBSCAN runs.
+    """
+    __tablename__ = "face_annotation"
+
+    id = Column(Integer, primary_key=True)
+    face_encoding_id = Column(
+        Integer, ForeignKey("face_encoding.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    person_id = Column(
+        Integer, ForeignKey("person.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # 'confirm' — user says this face IS this person (pin)
+    # 'reject'  — user says this face is NOT this person
+    action = Column(String(10), nullable=False)
+    annotated_by = Column(Integer, nullable=True)   # webapp user_id
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+

@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     hdbscan_min_samples: int = 1
     cluster_metric: str = "cosine"
 
+    # Incremental clustering
+    # Confidence (cosine similarity) required to immediately assign a new face
+    # to an existing centroid without waiting for a full HDBSCAN run.
+    incremental_centroid_threshold: float = 0.80
+    # When the number of unassigned faces exceeds this, trigger a full sweep.
+    incremental_unassigned_trigger: int = 50
+
     # ── Scan timeouts ───────────────────────────────────────────
     scan_stale_timeout_sec: int = 300
 

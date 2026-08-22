@@ -53,6 +53,7 @@ class FaceEncoding(Base):
     landmark_right_mouth_x = Column(Float, nullable=True)
     landmark_right_mouth_y = Column(Float, nullable=True)
     detection_score = Column(Float, nullable=True)
+    model_version = Column(String(255), nullable=True, index=True)   # e.g. "buffalo_l"
     face_image_path = Column(String(500), nullable=True)
     age = Column(Integer, nullable=True)
     gender = Column(String(10), nullable=True)

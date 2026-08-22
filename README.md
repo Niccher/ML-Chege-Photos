@@ -377,6 +377,9 @@ ML Chege Photos/
 | `HDBSCAN_MIN_CLUSTER_SIZE` | `2` | Minimum cluster size for HDBSCAN |
 | `HDBSCAN_MIN_SAMPLES` | `1` | Minimum samples parameter for HDBSCAN |
 | `CLUSTER_METRIC` | `cosine` | Distance metric for clustering |
+| `INCREMENTAL_CENTROID_THRESHOLD` | `0.80` | Cosine similarity threshold to assign a new face directly to a person centroid |
+| `INCREMENTAL_UNASSIGNED_TRIGGER` | `50` | Number of unassigned faces that triggers a complete HDBSCAN clustering pass |
+| `ML_API_KEY` | `my_super_secret_shared_token_key_123!` | Shared api security token key for ML endpoints |
 | `SCAN_STALE_TIMEOUT_SEC` | `300` | Seconds before a "processing" scan is considered stale |
 | `HOST` | `0.0.0.0` | Uvicorn bind address |
 | `PORT` | `8000` | Uvicorn listen port (container) |
