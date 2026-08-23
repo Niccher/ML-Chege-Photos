@@ -8,6 +8,7 @@ services:
     volumes:
       - "../Chege Photos WebApp/public/uploads:/app/uploads:ro"
       - insightface_models:/app/models/insightface_models
+      - "./app:/app/app"
     depends_on:
       ml-qdrant:
         condition: service_started

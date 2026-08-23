@@ -7,7 +7,7 @@ from app.database import Base
 
 
 class PhotoScan(Base):
-    __tablename__ = "photo_scan"
+    __tablename__ = "tbl_photo_scan"
 
     id = Column(Integer, primary_key=True)
     photo_id = Column(Integer, nullable=False, index=True, unique=True)
@@ -20,7 +20,7 @@ class PhotoScan(Base):
 
 
 class ScanJob(Base):
-    __tablename__ = "scan_job"
+    __tablename__ = "tbl_scan_job"
 
     id = Column(Integer, primary_key=True)
     status = Column(String(20), nullable=False, default="pending")
@@ -33,10 +33,10 @@ class ScanJob(Base):
 
 
 class FaceCluster(Base):
-    __tablename__ = "face_cluster"
+    __tablename__ = "tbl_face_cluster"
 
     id = Column(Integer, primary_key=True)
-    person_id = Column(Integer, ForeignKey("person.id"), nullable=False, index=True)
+    person_id = Column(Integer, ForeignKey("tbl_person.id"), nullable=False, index=True)
     centroid_point_id = Column(String(36), nullable=True, unique=True)
     merged_from = Column(JSON, nullable=True)
     split_from = Column(Integer, nullable=True)
@@ -50,15 +50,15 @@ class FaceAnnotation(Base):
     Rows with action='reject' prevent the face from being re-assigned to that
     person by future HDBSCAN runs.
     """
-    __tablename__ = "face_annotation"
+    __tablename__ = "tbl_face_annotation"
 
     id = Column(Integer, primary_key=True)
     face_encoding_id = Column(
-        Integer, ForeignKey("face_encoding.id", ondelete="CASCADE"),
+        Integer, ForeignKey("tbl_face_encoding.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
     person_id = Column(
-        Integer, ForeignKey("person.id", ondelete="CASCADE"),
+        Integer, ForeignKey("tbl_person.id", ondelete="CASCADE"),
         nullable=False, index=True,
     )
     # 'confirm' — user says this face IS this person (pin)

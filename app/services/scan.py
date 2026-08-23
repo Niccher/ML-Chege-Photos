@@ -44,7 +44,7 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
     model = _require_models()
 
     photo = db.execute(
-        text("SELECT id, path FROM db_chege_photos.photos WHERE id = :pid"),
+        text("SELECT id, path FROM db_chege_photos.tbl_photos WHERE id = :pid"),
         {"pid": photo_id},
     ).fetchone()
     if not photo:
@@ -192,7 +192,7 @@ def create_scan_job(photo_ids: Optional[list[int]] = None) -> ScanJob:
             total = len(photo_ids)
         else:
             total = db.execute(
-                text("SELECT COUNT(*) FROM db_chege_photos.photos WHERE type = 'image' AND deleted_at IS NULL")
+                text("SELECT COUNT(*) FROM db_chege_photos.tbl_photos WHERE type = 'image' AND deleted_at IS NULL")
             ).scalar()
 
         job = ScanJob(status="pending", total_photos=total)
@@ -217,7 +217,7 @@ def run_scan_job(job_id: int):
             db.commit()
 
             photos = db.execute(
-                text("SELECT id FROM db_chege_photos.photos WHERE type = 'image' AND deleted_at IS NULL ORDER BY id")
+                text("SELECT id FROM db_chege_photos.tbl_photos WHERE type = 'image' AND deleted_at IS NULL ORDER BY id")
             ).fetchall()
 
             for row in photos:

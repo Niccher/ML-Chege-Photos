@@ -32,11 +32,11 @@ def init_db():
 
 
 class FaceEncoding(Base):
-    __tablename__ = "face_encoding"
+    __tablename__ = "tbl_face_encoding"
 
     id = Column(Integer, primary_key=True)
     photo_id = Column(Integer, nullable=False, index=True)
-    person_id = Column(Integer, ForeignKey("person.id"), nullable=True, index=True)
+    person_id = Column(Integer, ForeignKey("tbl_person.id"), nullable=True, index=True)
     qdrant_point_id = Column(String(36), unique=True, nullable=False)
     bbox_x = Column(Float, nullable=False)
     bbox_y = Column(Float, nullable=False)
@@ -64,11 +64,11 @@ class FaceEncoding(Base):
 
 
 class Person(Base):
-    __tablename__ = "person"
+    __tablename__ = "tbl_person"
 
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=True)
-    thumbnail_face_id = Column(Integer, ForeignKey("face_encoding.id"), nullable=True)
+    thumbnail_face_id = Column(Integer, ForeignKey("tbl_face_encoding.id"), nullable=True)
     cluster_label = Column(Integer, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -78,7 +78,7 @@ class Person(Base):
 
 
 class PhotoTag(Base):
-    __tablename__ = "photo_tags"
+    __tablename__ = "tbl_photo_tags"
 
     id = Column(Integer, primary_key=True)
     photo_id = Column(Integer, nullable=False, index=True)

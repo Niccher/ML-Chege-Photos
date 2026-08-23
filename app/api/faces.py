@@ -125,7 +125,7 @@ def process_photo_pipeline_sync(
     model = _require_models()
 
     photo = db.execute(
-        text("SELECT id, path, user_id FROM db_chege_photos.photos WHERE id = :pid"),
+        text("SELECT id, path, user_id FROM db_chege_photos.tbl_photos WHERE id = :pid"),
         {"pid": photo_id},
     ).fetchone()
     if not photo:
@@ -269,7 +269,7 @@ def process_photo_pipeline_sync(
                     log.warning(f"Could not delete point {old_fe.qdrant_point_id} from Qdrant: {q_exc}")
 
         db.execute(
-            text("UPDATE db_chege_photos.photos SET scanned_face = 1 WHERE id = :pid"),
+            text("UPDATE db_chege_photos.tbl_photos SET scanned_face = 1 WHERE id = :pid"),
             {"pid": photo_id}
         )
 
@@ -288,7 +288,7 @@ def process_photo_pipeline_sync(
                 )
                 db.add(pt)
             db.execute(
-                text("UPDATE db_chege_photos.photos SET scanned_tag = 1 WHERE id = :pid"),
+                text("UPDATE db_chege_photos.tbl_photos SET scanned_tag = 1 WHERE id = :pid"),
                 {"pid": photo_id}
             )
         except Exception as exc:
@@ -312,7 +312,7 @@ def process_photo_pipeline_sync(
                 )]
             )
             db.execute(
-                text("UPDATE db_chege_photos.photos SET scanned_clip = 1 WHERE id = :pid"),
+                text("UPDATE db_chege_photos.tbl_photos SET scanned_clip = 1 WHERE id = :pid"),
                 {"pid": photo_id}
             )
         except Exception as exc:
