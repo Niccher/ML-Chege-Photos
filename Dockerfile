@@ -22,13 +22,9 @@ RUN pip install -r requirements-core.txt
 COPY requirements-ml.txt .
 RUN pip install -r requirements-ml.txt
 
-# ── Layer 3: PyTorch + Transformers via pre-built local wheels ─────────────────
-# Uses the wheels/ directory to avoid re-downloading multi-GB packages from PyPI.
-# NOTE: pin torch and transformers versions in requirements.txt for reproducibility.
+# ── Layer 3: PyTorch + Transformers + App dependencies ─────────────────────────
 COPY requirements.txt .
-COPY wheels /wheels
-RUN pip install --find-links /wheels -r requirements.txt \
-    && rm -rf /wheels
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Layer 4: Application code (changes most often — kept last) ────────────────
 COPY . .
