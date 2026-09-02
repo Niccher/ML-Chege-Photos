@@ -1,4 +1,4 @@
-"""Create photo_scan, scan_job, face_cluster tables
+"""Create tbl_photo_scans, tbl_scan_jobs, tbl_face_clusters tables
 
 Revision ID: 001
 Revises:
@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.create_table(
-        "photo_scan",
+        "tbl_photo_scans",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("photo_id", sa.Integer(), nullable=False, index=True),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
@@ -33,7 +33,7 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "scan_job",
+        "tbl_scan_jobs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="pending"),
         sa.Column("total_photos", sa.Integer(), nullable=False, server_default="0"),
@@ -46,9 +46,9 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "face_cluster",
+        "tbl_face_clusters",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("person_id", sa.Integer(), sa.ForeignKey("person.id"), nullable=False, index=True),
+        sa.Column("person_id", sa.Integer(), sa.ForeignKey("tbl_people.id"), nullable=False, index=True),
         sa.Column("centroid_point_id", sa.String(length=36), nullable=True, unique=True),
         sa.Column("merged_from", sa.JSON(), nullable=True),
         sa.Column("split_from", sa.Integer(), nullable=True),
@@ -58,6 +58,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table("face_cluster")
-    op.drop_table("scan_job")
-    op.drop_table("photo_scan")
+    op.drop_table("tbl_face_clusters")
+    op.drop_table("tbl_scan_jobs")
+    op.drop_table("tbl_photo_scans")

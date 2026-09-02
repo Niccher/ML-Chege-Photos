@@ -207,13 +207,13 @@ Expected response:
 
 ### MySQL (`db_chege_photos`)
 
-#### `tbl_face_encoding` — one row per detected face instance
+#### `tbl_face_encodings` — one row per detected face instance
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INT (PK) | Auto-increment |
 | `photo_id` | INT (indexed) | FK to `db_chege_photos.tbl_photos` (shared web app DB) |
-| `person_id` | INT (FK → `tbl_person.id`, nullable, indexed) | Assigned person; null until clustering |
+| `person_id` | INT (FK → `tbl_people.id`, nullable, indexed) | Assigned person; null until clustering |
 | `qdrant_point_id` | VARCHAR(36) (unique) | UUID linking to Qdrant point |
 | `bbox_x`, `bbox_y`, `bbox_w`, `bbox_h` | FLOAT | Bounding box in pixels |
 | `landmark_*` | FLOAT (×10) | 5 facial landmarks: left/right eye, nose, left/right mouth corner |
@@ -223,18 +223,18 @@ Expected response:
 | `gender` | VARCHAR(10) (nullable) | "Male" / "Female" |
 | `created_at` | DATETIME | Server default `now()` |
 
-#### `tbl_person` — one row per discovered person
+#### `tbl_people` — one row per discovered person
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INT (PK) | Auto-increment |
 | `name` | VARCHAR(255) (nullable) | User-assigned name |
-| `thumbnail_face_id` | INT (FK → `tbl_face_encoding.id`, nullable) | Representative face for thumbnails |
+| `thumbnail_face_id` | INT (FK → `tbl_face_encodings.id`, nullable) | Representative face for thumbnails |
 | `cluster_label` | INT (nullable) | HDBSCAN cluster label |
 | `created_at` | DATETIME | Server default `now()` |
 | `updated_at` | DATETIME | Auto-updates on change |
 
-#### `tbl_photo_scan` — per-photo scan status (via `app/api/scan.py`)
+#### `tbl_photo_scans` — per-photo scan status (via `app/api/scan.py`)
 
 | Column | Type | Notes |
 |---|---|---|
@@ -247,7 +247,7 @@ Expected response:
 | `face_count` | INT (nullable) | Number of faces detected |
 | `created_at` | DATETIME | Server default `now()` |
 
-#### `tbl_scan_job` — batch scan jobs
+#### `tbl_scan_jobs` — batch scan jobs
 
 | Column | Type | Notes |
 |---|---|---|
@@ -260,12 +260,12 @@ Expected response:
 | `completed_at` | DATETIME (nullable) | When the job finished |
 | `error_message` | TEXT (nullable) | Overall error if job failed |
 
-#### `tbl_face_cluster` — centroid storage and lineage
+#### `tbl_face_clusters` — centroid storage and lineage
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INT (PK) | Auto-increment |
-| `person_id` | INT (FK → `tbl_person.id`, indexed) | Associated person |
+| `person_id` | INT (FK → `tbl_people.id`, indexed) | Associated person |
 | `centroid_point_id` | VARCHAR(36) (unique, nullable) | Qdrant point ID in `_centroids` collection |
 | `merged_from` | JSON (nullable) | Array of source cluster IDs if this cluster was created by a merge |
 | `split_from` | INT (nullable) | Source cluster ID if this cluster was created by a split |
