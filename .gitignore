@@ -31,7 +31,6 @@ ENV/
 # Python Packaging & Distribution
 *.egg-info/
 /wheels/
-requirements-core.txt
 
 # OS Files
 .DS_Store
