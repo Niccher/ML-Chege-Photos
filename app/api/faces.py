@@ -132,9 +132,18 @@ def process_photo_pipeline_sync(
         raise HTTPException(404, "Photo not found")
     user_id = photo.user_id if hasattr(photo, "user_id") else (photo[2] if len(photo) > 2 else None)
 
-    # DB stores path as "uploads/filename"; mount is already at /app/uploads
     rel = photo.path.removeprefix("uploads/")
-    photo_path = UPLOADS_DIR / rel
+    uploads_base = Path(settings.uploads_dir)
+    photo_path = uploads_base / rel
+    if not photo_path.exists() and settings.webapp_url:
+        import urllib.request
+        download_url = f"{settings.webapp_url.rstrip('/')}/uploads/{rel}"
+        try:
+            photo_path.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(download_url, str(photo_path))
+        except Exception as err:
+            log.warning("Could not download photo %s from %s: %s", photo_id, download_url, err)
+
     if not photo_path.exists():
         raise HTTPException(404, f"Photo file not found at {photo_path}")
 

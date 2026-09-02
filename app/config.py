@@ -11,12 +11,43 @@ class Settings(BaseSettings):
     db_password: str = "root_password"
     db_name: str = "ml_chege_photos"
 
+    # Railway MySQL fallbacks
+    mysqlhost: str | None = None
+    mysqlport: int | None = None
+    mysqluser: str | None = None
+    mysqlpassword: str | None = None
+    mysqldatabase: str | None = None
+
+    @property
+    def effective_db_host(self) -> str:
+        return self.mysqlhost or self.db_host
+
+    @property
+    def effective_db_port(self) -> int:
+        return self.mysqlport or self.db_port
+
+    @property
+    def effective_db_user(self) -> str:
+        return self.mysqluser or self.db_user
+
+    @property
+    def effective_db_password(self) -> str:
+        return self.mysqlpassword or self.db_password
+
+    @property
+    def effective_db_name(self) -> str:
+        return self.mysqldatabase or self.db_name
+
     @property
     def database_url(self) -> str:
         return (
-            f"mysql+pymysql://{self.db_user}:{self.db_password}"
-            f"@{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
+            f"mysql+pymysql://{self.effective_db_user}:{self.effective_db_password}"
+            f"@{self.effective_db_host}:{self.effective_db_port}/{self.effective_db_name}?charset=utf8mb4"
         )
+
+    # ── Storage & Inter-service ─────────────────────────────────
+    uploads_dir: str = "/app/uploads"
+    webapp_url: str | None = None
 
     # ── Qdrant ──────────────────────────────────────────────────
     qdrant_host: str = "qdrant"
