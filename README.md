@@ -22,6 +22,28 @@ ML Chege Photos is a FastAPI microservice that provides ML-powered face analysis
 
 ---
 
+## ⚠️ Hardware & Production Memory Sizing (Railway / Cloud)
+
+> [!WARNING]
+> **Container Memory Limits**: ML Chege Photos executes three neural networks concurrently in memory:
+> - **InsightFace Buffalo-L** (RetinaFace + ArcFace 512-d + GenderAge + Landmarks): ~300 MB on disk, ~450 MB in RAM.
+> - **CLIP Multimodal Transformer** (ViT-B/32 or ViT-B/16): ~588 MB on disk, ~650 MB in RAM.
+> - **YOLOv8 Nano Objects**: ~12 MB on disk, ~80 MB in RAM.
+>
+> | Resource | Minimum Required | Recommended for Production |
+> |---|---|---|
+> | **RAM** | **2 GB (2048 MB)** | **4 GB (4096 MB)** |
+> | **vCPU** | 1 vCPU | 2–4 vCPUs |
+> | **Disk / Ephemeral Storage** | 2 GB free space | 5 GB free space |
+>
+> **Preventing OOM (Out-Of-Memory) Kills on Railway**:
+> When a model like CLIP or ArcFace is unpickled or loaded into PyTorch alongside active NumPy image arrays, memory momentarily spikes by ~1.2x. If your Railway container memory limit is set to 1 GB or less, the Linux kernel will trigger an **OOM Kill** (`SIGKILL 137`), terminating the process and interrupting active photo uploads.
+>
+> **Railway Recommendation**:
+> Open your **ML Service Settings** on Railway → **Resources** → Set **Memory Limit** to at least **2048 MB** (or 4096 MB).
+
+---
+
 ## Architecture
 
 ```

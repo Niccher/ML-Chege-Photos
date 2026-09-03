@@ -172,3 +172,59 @@ def get_model_inventory() -> list[dict]:
         })
 
     return inventory
+
+
+def ensure_all_models_ready() -> dict[str, bool]:
+    """
+    Checks if all models are present on disk and loaded in memory.
+    If missing, pauses and downloads each model in isolation with gc.collect()
+    to prevent memory spikes that trigger Railway OOM kills.
+    """
+    import gc
+    from app.ml.loader import get_model_status, load_models
+    from app.ml import object_detection, semantic_search
+
+    status = {
+        "insightface": get_model_status(),
+        "yolov8n": object_detection._net is not None,
+        "clip": semantic_search._clip_model is not None,
+    }
+
+    # 1. InsightFace
+    if not status["insightface"]:
+        log.warning("InsightFace models missing or uninitialized. Downloading/loading now...")
+        gc.collect()
+        try:
+            load_models()
+            status["insightface"] = get_model_status()
+            log.info("InsightFace successfully loaded.")
+        except Exception as exc:
+            log.error("Failed to load InsightFace: %s", exc)
+        gc.collect()
+
+    # 2. YOLOv8
+    if not status["yolov8n"]:
+        log.warning("YOLOv8 model missing or uninitialized. Downloading/loading now...")
+        gc.collect()
+        try:
+            object_detection.download_yolov8_model()
+            object_detection.load_yolo_model()
+            status["yolov8n"] = object_detection._net is not None
+            log.info("YOLOv8 successfully loaded.")
+        except Exception as exc:
+            log.error("Failed to load YOLOv8: %s", exc)
+        gc.collect()
+
+    # 3. CLIP
+    if not status["clip"]:
+        log.warning("CLIP model missing or uninitialized. Downloading/loading now...")
+        gc.collect()
+        try:
+            semantic_search.load_clip_model()
+            status["clip"] = semantic_search._clip_model is not None
+            log.info("CLIP successfully loaded.")
+        except Exception as exc:
+            log.error("Failed to load CLIP: %s", exc)
+        gc.collect()
+
+    return status

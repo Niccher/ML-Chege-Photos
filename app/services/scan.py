@@ -41,6 +41,8 @@ def _read_photo(photo_path: str) -> np.ndarray:
 
 
 def process_single_photo(photo_id: int, db: Session) -> dict:
+    from app.ml.manifest import ensure_all_models_ready
+    ensure_all_models_ready()
     model = _require_models()
 
     photo = db.execute(
@@ -138,7 +140,22 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
             )]
         )
     except Exception as exc:
-        log.error("CLIP embedding failed for photo %d: %s", photo_id, exc)
+        log.warning("CLIP embedding failed for photo %d: %s. Re-verifying model...", photo_id, exc)
+        try:
+            ensure_all_models_ready()
+            from app.ml import semantic_search
+            clip_emb = semantic_search.encode_image(str(photo_path))
+            qdrant.upsert(
+                collection_name=settings.qdrant_photo_collection,
+                points=[PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=clip_emb,
+                    payload={"photo_id": photo_id}
+                )]
+            )
+            log.info("CLIP embedding succeeded on retry for photo %d", photo_id)
+        except Exception as retry_exc:
+            log.error("CLIP embedding retry failed for photo %d: %s", photo_id, retry_exc)
 
     # ── Object Detection (YOLOv8) ──
     try:
@@ -155,7 +172,23 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
             )
             db.add(pt)
     except Exception as exc:
-        log.error("Object detection failed for photo %d: %s", photo_id, exc)
+        log.warning("Object detection failed for photo %d: %s. Re-verifying model...", photo_id, exc)
+        try:
+            ensure_all_models_ready()
+            from app.ml import object_detection
+            from app.database import PhotoTag
+            tags = object_detection.detect_objects(str(photo_path))
+            db.query(PhotoTag).filter(PhotoTag.photo_id == photo_id).delete()
+            for t in tags:
+                pt = PhotoTag(
+                    photo_id=photo_id,
+                    tag=t["tag"],
+                    confidence=t["confidence"]
+                )
+                db.add(pt)
+            log.info("Object detection succeeded on retry for photo %d", photo_id)
+        except Exception as retry_exc:
+            log.error("Object detection retry failed for photo %d: %s", photo_id, retry_exc)
 
     db.commit()
     return {"face_count": len(results), "faces": results}
