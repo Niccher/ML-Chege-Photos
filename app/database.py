@@ -99,8 +99,8 @@ def get_qdrant() -> QdrantClient:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             _qdrant_client = QdrantClient(
-                host=settings.qdrant_host,
-                port=settings.qdrant_port,
+                host=settings.effective_qdrant_host,
+                port=settings.effective_qdrant_port,
                 prefer_grpc=False,
             )
     return _qdrant_client

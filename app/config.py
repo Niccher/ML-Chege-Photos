@@ -20,23 +20,36 @@ class Settings(BaseSettings):
 
     @property
     def effective_db_host(self) -> str:
-        return self.mysqlhost or self.db_host
+        import os
+        return (
+            self.mysqlhost
+            or os.getenv("MYSQLHOST")
+            or ("mysql.railway.internal" if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) else self.db_host)
+        )
 
     @property
     def effective_db_port(self) -> int:
-        return self.mysqlport or self.db_port
+        import os
+        return self.mysqlport or (int(os.getenv("MYSQLPORT")) if os.getenv("MYSQLPORT") else self.db_port)
 
     @property
     def effective_db_user(self) -> str:
-        return self.mysqluser or self.db_user
+        import os
+        return self.mysqluser or os.getenv("MYSQLUSER") or self.db_user
 
     @property
     def effective_db_password(self) -> str:
-        return self.mysqlpassword or self.db_password
+        import os
+        return self.mysqlpassword or os.getenv("MYSQLPASSWORD") or self.db_password
 
     @property
     def effective_db_name(self) -> str:
-        return self.mysqldatabase or self.db_name
+        import os
+        return (
+            self.mysqldatabase
+            or os.getenv("MYSQLDATABASE")
+            or ("railway" if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) else self.db_name)
+        )
 
     @property
     def database_url(self) -> str:
@@ -55,8 +68,21 @@ class Settings(BaseSettings):
     qdrant_collection: str = "face_embeddings"
 
     @property
+    def effective_qdrant_host(self) -> str:
+        import os
+        return (
+            os.getenv("QDRANT_HOST")
+            or ("ml-qdrant.railway.internal" if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) else self.qdrant_host)
+        )
+
+    @property
+    def effective_qdrant_port(self) -> int:
+        import os
+        return int(os.getenv("QDRANT_PORT") or self.qdrant_port)
+
+    @property
     def qdrant_url(self) -> str:
-        return f"http://{self.qdrant_host}:{self.qdrant_port}"
+        return f"http://{self.effective_qdrant_host}:{self.effective_qdrant_port}"
 
     # ── Model pack ──────────────────────────────────────────────
     face_model_pack: str = "buffalo_l"
