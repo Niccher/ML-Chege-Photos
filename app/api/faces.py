@@ -632,6 +632,77 @@ async def cluster_faces(
     }
 
 
+# ── Cluster Auto-Tuning & Quality Optimization ─────────────────
+
+
+@router.post("/autotune")
+def autotune_clustering(
+    db: Session = Depends(get_db),
+):
+    """
+    Analyzes existing face vectors in Qdrant and determines the mathematically
+    optimal HDBSCAN hyperparameters using Silhouette Analysis and noise balance.
+    """
+    vectors, _ = ml_clustering.get_all_face_vectors()
+    if not vectors:
+        return {
+            "status": "empty",
+            "message": "No face vectors found in database. Scan some photos first.",
+            "recommended_min_cluster_size": settings.hdbscan_min_cluster_size,
+            "recommended_min_samples": settings.hdbscan_min_samples,
+            "silhouette_score": 0.0,
+            "n_clusters": 0,
+            "noise_ratio": 0.0,
+            "total_vectors_analyzed": 0,
+            "top_candidates": []
+        }
+
+    return ml_clustering.autotune_hdbscan(vectors)
+
+
+@router.post("/simulate")
+def simulate_clustering(
+    min_cluster_size: int = Query(..., ge=1, le=50, description="Hypothetical HDBSCAN min_cluster_size"),
+    min_samples: int = Query(..., ge=1, le=50, description="Hypothetical HDBSCAN min_samples"),
+    db: Session = Depends(get_db),
+):
+    """
+    Runs a dry-run HDBSCAN clustering pass on current face vectors without modifying MySQL or Qdrant.
+    Returns projected Person clusters, noise count, and Silhouette quality score.
+    """
+    vectors, _ = ml_clustering.get_all_face_vectors()
+    n = len(vectors)
+    if n == 0:
+        return {
+            "status": "empty",
+            "projected_people": 0,
+            "projected_noise": 0,
+            "noise_ratio": 0.0,
+            "silhouette_score": 0.0,
+            "total_faces": 0,
+            "warning": "No faces scanned yet."
+        }
+
+    res = ml_clustering.run_hdbscan(vectors, min_cluster_size, min_samples)
+    quality = ml_clustering.evaluate_clustering_quality(vectors, res["labels"])
+
+    warning = None
+    if min_samples == 1:
+        warning = "min_samples=1 is prone to cluster bleeding (falsely merging distinct people)."
+
+    return {
+        "status": "success",
+        "min_cluster_size": min_cluster_size,
+        "min_samples": min_samples,
+        "projected_people": res["n_clusters"],
+        "projected_noise": res["noise"],
+        "noise_ratio": quality["noise_ratio"],
+        "silhouette_score": quality["silhouette_score"],
+        "total_faces": n,
+        "advisory": warning
+    }
+
+
 # ── Get faces by photo ──────────────────────────────────────────
 
 

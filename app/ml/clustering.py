@@ -5,6 +5,7 @@ import logging
 
 import numpy as np
 from sklearn.cluster import HDBSCAN
+from sklearn.metrics import silhouette_score
 from qdrant_client.models import PointStruct, VectorParams, Distance
 
 from app.config import settings
@@ -82,6 +83,135 @@ def run_hdbscan(vectors: list, min_cluster_size: int | None = None, min_samples:
         "labels": labels.tolist(),
         "n_clusters": len(unique),
         "noise": int((labels == -1).sum()),
+    }
+
+
+def evaluate_clustering_quality(vectors: list, labels: list) -> dict:
+    X = np.array(vectors)
+    lbls = np.array(labels)
+    n = len(X)
+    if n == 0:
+        return {
+            "silhouette_score": 0.0,
+            "n_clusters": 0,
+            "noise": 0,
+            "noise_ratio": 0.0,
+            "total_points": 0,
+        }
+
+    non_noise = lbls != -1
+    unique_clusters = set(lbls[non_noise])
+    n_clusters = len(unique_clusters)
+    noise_count = int((lbls == -1).sum())
+    noise_ratio = round(float(noise_count / n), 3)
+
+    score = 0.0
+    if n_clusters >= 2 and int(non_noise.sum()) > n_clusters:
+        try:
+            score = round(float(silhouette_score(X[non_noise], lbls[non_noise], metric=settings.cluster_metric)), 3)
+        except Exception as exc:
+            log.warning("Silhouette score calculation error: %s", exc)
+            score = 0.0
+
+    return {
+        "silhouette_score": score,
+        "n_clusters": n_clusters,
+        "noise": noise_count,
+        "noise_ratio": noise_ratio,
+        "total_points": n,
+    }
+
+
+def autotune_hdbscan(vectors: list, candidate_mcs: list[int] | None = None, candidate_ms: list[int] | None = None) -> dict:
+    n = len(vectors)
+    if n < 4:
+        return {
+            "status": "insufficient_data",
+            "message": f"Only {n} face vector(s) found. Need at least 4 vectors for hyperparameter optimization.",
+            "recommended_min_cluster_size": settings.hdbscan_min_cluster_size,
+            "recommended_min_samples": settings.hdbscan_min_samples,
+            "silhouette_score": 0.0,
+            "n_clusters": 0,
+            "noise_ratio": 0.0,
+            "total_vectors_analyzed": n,
+            "candidates": [],
+        }
+
+    mcs_candidates = candidate_mcs or [2, 3, 4, 5]
+    ms_candidates = candidate_ms or [1, 2, 3]
+
+    candidates = []
+    best_candidate = None
+    best_score = -999.0
+
+    X = np.array(vectors)
+
+    for mcs in mcs_candidates:
+        if mcs > n:
+            continue
+        for ms in ms_candidates:
+            if ms > mcs:
+                continue
+            try:
+                clusterer = HDBSCAN(
+                    min_cluster_size=mcs,
+                    min_samples=ms,
+                    metric=settings.cluster_metric,
+                )
+                labels = clusterer.fit_predict(X)
+                quality = evaluate_clustering_quality(vectors, labels.tolist())
+                sil = quality["silhouette_score"]
+                noise_r = quality["noise_ratio"]
+                k = quality["n_clusters"]
+
+                # Composite score: reward high silhouette and cluster formation, penalize high noise
+                if k < 2:
+                    composite = -1.0 + (k * 0.1) - noise_r
+                else:
+                    composite = sil * (1.0 - (noise_r * 0.6))
+                    # Favor min_samples >= 2 to avoid single-point bridge bleeding
+                    if ms > 1:
+                        composite += 0.02
+
+                candidate_info = {
+                    "min_cluster_size": mcs,
+                    "min_samples": ms,
+                    "silhouette_score": sil,
+                    "n_clusters": k,
+                    "noise": quality["noise"],
+                    "noise_ratio": noise_r,
+                    "composite_score": round(float(composite), 4),
+                }
+                candidates.append(candidate_info)
+
+                if composite > best_score:
+                    best_score = composite
+                    best_candidate = candidate_info
+            except Exception as exc:
+                log.warning("HDBSCAN grid test failed for mcs=%d, ms=%d: %s", mcs, ms, exc)
+
+    candidates.sort(key=lambda c: c["composite_score"], reverse=True)
+
+    if not best_candidate:
+        best_candidate = {
+            "min_cluster_size": settings.hdbscan_min_cluster_size,
+            "min_samples": settings.hdbscan_min_samples,
+            "silhouette_score": 0.0,
+            "n_clusters": 0,
+            "noise": n,
+            "noise_ratio": 1.0,
+        }
+
+    return {
+        "status": "success",
+        "recommended_min_cluster_size": best_candidate["min_cluster_size"],
+        "recommended_min_samples": best_candidate["min_samples"],
+        "silhouette_score": best_candidate["silhouette_score"],
+        "n_clusters": best_candidate["n_clusters"],
+        "noise_ratio": best_candidate["noise_ratio"],
+        "rationale": f"Optimal configuration discovered: {best_candidate['n_clusters']} Person cluster(s) with a Silhouette score of {best_candidate['silhouette_score']} and {best_candidate['noise_ratio']*100:.1f}% noise.",
+        "top_candidates": candidates[:5],
+        "total_vectors_analyzed": n,
     }
 
 
