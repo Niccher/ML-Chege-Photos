@@ -53,6 +53,15 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        import os
+        raw_url = os.getenv("MYSQL_URL") or os.getenv("DATABASE_URL")
+        if raw_url:
+            if raw_url.startswith("mysql://"):
+                raw_url = "mysql+pymysql://" + raw_url[len("mysql://"):]
+            if "?" not in raw_url:
+                raw_url += "?charset=utf8mb4"
+            return raw_url
+
         return (
             f"mysql+pymysql://{self.effective_db_user}:{self.effective_db_password}"
             f"@{self.effective_db_host}:{self.effective_db_port}/{self.effective_db_name}?charset=utf8mb4"
@@ -70,14 +79,46 @@ class Settings(BaseSettings):
     @property
     def effective_qdrant_host(self) -> str:
         import os
-        return (
-            os.getenv("QDRANT_HOST")
-            or ("ml-qdrant.railway.internal" if (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")) else self.qdrant_host)
-        )
+        import socket
+        from urllib.parse import urlparse
+
+        q_url = os.getenv("QDRANT_URL")
+        if q_url:
+            parsed = urlparse(q_url)
+            if parsed.hostname:
+                return parsed.hostname
+
+        if os.getenv("QDRANT_HOST"):
+            return os.getenv("QDRANT_HOST")
+
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            candidates = [
+                "ml-qdrant.railway.internal",
+                "qdrant.railway.internal",
+                "ml-qdrant",
+                "qdrant"
+            ]
+            for host in candidates:
+                try:
+                    socket.getaddrinfo(host, 6333)
+                    return host
+                except Exception:
+                    pass
+            return "ml-qdrant.railway.internal"
+
+        return self.qdrant_host
 
     @property
     def effective_qdrant_port(self) -> int:
         import os
+        from urllib.parse import urlparse
+
+        q_url = os.getenv("QDRANT_URL")
+        if q_url:
+            parsed = urlparse(q_url)
+            if parsed.port:
+                return parsed.port
+
         return int(os.getenv("QDRANT_PORT") or self.qdrant_port)
 
     @property
