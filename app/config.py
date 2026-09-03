@@ -137,11 +137,11 @@ class Settings(BaseSettings):
     object_det_threshold: float = 0.5
 
     # ── Sensitive attributes ────────────────────────────────────
-    include_sensitive_attributes: bool = False
+    include_sensitive_attributes: bool = True
 
     # ── Clustering ──────────────────────────────────────────────
     hdbscan_min_cluster_size: int = 2
-    hdbscan_min_samples: int = 1
+    hdbscan_min_samples: int = 2
     cluster_metric: str = "cosine"
 
     # Incremental clustering

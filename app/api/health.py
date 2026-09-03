@@ -68,7 +68,8 @@ def reload_models_endpoint(
     model_pack: str | None = None,
     face_det_thresh: float | None = None,
     clip_model_name: str | None = None,
-    object_det_threshold: float | None = None
+    object_det_threshold: float | None = None,
+    include_sensitive: str | bool | None = None,
 ):
     """Reload models and configurations dynamically."""
     from app.config import settings
@@ -98,6 +99,12 @@ def reload_models_endpoint(
     if object_det_threshold is not None:
         settings.object_det_threshold = object_det_threshold
 
+    if include_sensitive is not None:
+        if isinstance(include_sensitive, str):
+            settings.include_sensitive_attributes = include_sensitive.lower() in ("true", "1", "yes")
+        else:
+            settings.include_sensitive_attributes = bool(include_sensitive)
+
     if should_reload_face:
         load_models()
 
@@ -113,5 +120,6 @@ def reload_models_endpoint(
         "face_det_thresh": settings.face_det_thresh,
         "clip_model_name": settings.clip_model_name,
         "object_det_threshold": settings.object_det_threshold,
+        "include_sensitive_attributes": settings.include_sensitive_attributes,
         "models_loaded": get_model_status()
     }
