@@ -36,29 +36,34 @@ async def lifespan(app: FastAPI):
     app.state.qdrant_ready = False
     app.state.db_ready = False
 
-    # ── DB tables ───────────────────────────────────────────────
-    try:
-        init_db()
-        log.info("Database tables ensured")
-        app.state.db_ready = True
-    except Exception as exc:
-        log.warning("Could not init DB tables: %s", exc)
+    # ── Background initialization (prevents blocking Uvicorn port binding) ──
+    async def init_services_background():
+        # ── DB tables ───────────────────────────────────────────
+        try:
+            await asyncio.to_thread(init_db)
+            log.info("Database tables ensured")
+            app.state.db_ready = True
+        except Exception as exc:
+            log.warning("Could not init DB tables: %s", exc)
 
-    # ── Qdrant collections ──────────────────────────────────────
-    try:
-        ensure_qdrant_collection()
-        ml_clustering.ensure_collections()
-        log.info("Qdrant collections ready (main + centroids)")
-        app.state.qdrant_ready = True
-    except Exception as exc:
-        log.warning("Qdrant not available on startup: %s", exc)
+        # ── Qdrant collections ──────────────────────────────────
+        try:
+            await asyncio.to_thread(ensure_qdrant_collection)
+            await asyncio.to_thread(ml_clustering.ensure_collections)
+            log.info("Qdrant collections ready (main + centroids)")
+            app.state.qdrant_ready = True
+        except Exception as exc:
+            log.warning("Qdrant not available on startup: %s", exc)
 
-    # ── Models ──────────────────────────────────────────────────
-    try:
-        load_models()
-        app.state.models_loaded = get_model_status()
-    except Exception as exc:
-        log.warning("Models not loaded on startup: %s", exc)
+        # ── Models ──────────────────────────────────────────────
+        try:
+            await asyncio.to_thread(load_models)
+            app.state.models_loaded = get_model_status()
+            log.info("Face analysis models loaded: %s", app.state.models_loaded)
+        except Exception as exc:
+            log.warning("Models not loaded on startup: %s", exc)
+
+    asyncio.create_task(init_services_background())
 
 
     # ── Stale cleanup task ───────────────────────────────────────
