@@ -16,6 +16,7 @@ from app.api.scan import router as scan_router
 from app.api.clusters import router as clusters_router
 from app.api.search import router as search_router
 from app.api.models import router as models_router
+from app.api.metrics import router as metrics_router
 from app.ml.loader import load_models, get_model_status
 from app.ml.semantic_search import load_clip_model
 from app.ml import clustering as ml_clustering
@@ -119,6 +120,7 @@ def root_index():
 
 
 app.include_router(health_router)
+app.include_router(metrics_router)
 app.include_router(faces_router, dependencies=[Depends(get_api_key)])
 app.include_router(scan_router, dependencies=[Depends(get_api_key)])
 app.include_router(clusters_router, dependencies=[Depends(get_api_key)])
