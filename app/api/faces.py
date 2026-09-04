@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
 from qdrant_client.models import PointStruct
 
@@ -121,8 +121,12 @@ def process_photo_pipeline_sync(
     scan_tags: bool,
     scan_clip: bool,
     db: Session,
+    webapp_url: str | None = None,
 ) -> dict:
     model = _require_models()
+
+    if webapp_url:
+        settings.set_dynamic_webapp_url(webapp_url)
 
     from app.config import settings as _cfg
     _db_schema = _cfg.effective_db_name
@@ -134,24 +138,61 @@ def process_photo_pipeline_sync(
         raise HTTPException(404, "Photo not found")
     user_id = photo.user_id if hasattr(photo, "user_id") else (photo[2] if len(photo) > 2 else None)
 
-    rel = photo.path.removeprefix("uploads/")
+    rel = photo.path.strip().lstrip("/").removeprefix("uploads/").lstrip("/")
     uploads_base = Path(settings.uploads_dir)
     photo_path = uploads_base / rel
-    if not photo_path.exists() and settings.effective_webapp_url:
-        import urllib.request
-        download_url = f"{settings.effective_webapp_url}/uploads/{rel}"
-        try:
-            photo_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(download_url, str(photo_path))
-        except Exception as err:
-            log.warning("Could not download photo %s from %s: %s", photo_id, download_url, err)
 
-    if not photo_path.exists():
-        raise HTTPException(404, f"Photo file not found at {photo_path}")
+    active_webapp = (
+        webapp_url.strip().rstrip("/") if webapp_url else None
+    ) or settings.effective_webapp_url
+    if active_webapp and not active_webapp.startswith(("http://", "https://")):
+        active_webapp = "https://" + active_webapp
+
+    # Download from WebApp if missing or empty on disk
+    if (not photo_path.exists() or photo_path.stat().st_size == 0) and active_webapp:
+        import urllib.request
+
+        candidate_urls = [
+            f"{active_webapp}/uploads/{rel}",
+        ]
+        # If running on Railway, also attempt private DNS resolution first
+        if "railway" in (active_webapp or "").lower():
+            candidate_urls.insert(0, f"http://chege-photos-webapp.railway.internal/uploads/{rel}")
+
+        photo_path.parent.mkdir(parents=True, exist_ok=True)
+        download_success = False
+        last_dl_error = None
+
+        for dl_url in candidate_urls:
+            try:
+                req = urllib.request.Request(
+                    dl_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ChegePhotosML/1.0)"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        content = resp.read()
+                        if len(content) > 100:  # Real image payload
+                            with open(photo_path, "wb") as f:
+                                f.write(content)
+                            download_success = True
+                            break
+            except Exception as dl_err:
+                last_dl_error = dl_err
+
+        if not download_success:
+            log.warning("Could not download photo %s from candidates %s: %s", photo_id, candidate_urls, last_dl_error)
+
+    if not photo_path.exists() or photo_path.stat().st_size == 0:
+        raise HTTPException(404, f"Photo file not found or empty at {photo_path}")
 
     img = cv2.imread(str(photo_path))
     if img is None:
-        raise HTTPException(400, "Could not read photo file")
+        try:
+            photo_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(400, f"Could not decode image file at {photo_path}")
 
     results = []
 
@@ -333,19 +374,53 @@ def process_photo_pipeline_sync(
     return {"photo_id": photo_id, "face_count": len(results), "faces": results}
 
 
-def process_photo_pipeline_queued(photo_id: int, scan_faces: bool, scan_tags: bool, scan_clip: bool):
+def process_photo_pipeline_queued(
+    photo_id: int,
+    scan_faces: bool,
+    scan_tags: bool,
+    scan_clip: bool,
+    webapp_url: str | None = None,
+):
     from app.database import SessionLocal
+    from datetime import datetime, timezone
     db = SessionLocal()
     try:
-        process_photo_pipeline_sync(
+        scan = db.query(PhotoScan).filter(PhotoScan.photo_id == photo_id).first()
+        if not scan:
+            scan = PhotoScan(photo_id=photo_id, status="processing", started_at=datetime.now(timezone.utc))
+            db.add(scan)
+        else:
+            scan.status = "processing"
+            scan.started_at = datetime.now(timezone.utc)
+            scan.error_message = None
+        db.commit()
+
+        result = process_photo_pipeline_sync(
             photo_id=photo_id,
             scan_faces=scan_faces,
             scan_tags=scan_tags,
             scan_clip=scan_clip,
-            db=db
+            db=db,
+            webapp_url=webapp_url,
         )
+
+        scan.status = "completed"
+        scan.face_count = result.get("face_count", 0)
+        scan.completed_at = datetime.now(timezone.utc)
+        scan.error_message = None
+        db.commit()
     except Exception as e:
-        log.error(f"Failed to run queued photo pipeline for photo {photo_id}: {e}", exc_info=True)
+        err_msg = str(e)
+        log.error("Failed to run queued photo pipeline for photo %d: %s", photo_id, err_msg, exc_info=True)
+        try:
+            scan = db.query(PhotoScan).filter(PhotoScan.photo_id == photo_id).first()
+            if scan:
+                scan.status = "failed"
+                scan.error_message = err_msg
+                scan.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception as db_err:
+            log.error("Failed to persist failure status for photo %d: %s", photo_id, db_err)
     finally:
         db.close()
 
@@ -357,8 +432,14 @@ async def encode_photo(
     scan_tags: bool = Form(True),
     scan_clip: bool = Form(True),
     async_task: bool = Form(False),
+    webapp_url: str | None = Form(None),
+    x_webapp_url: str | None = Header(None, alias="X-Webapp-Url"),
     db: Session = Depends(get_db),
 ):
+    target_webapp = webapp_url or x_webapp_url
+    if target_webapp:
+        settings.set_dynamic_webapp_url(target_webapp)
+
     if async_task:
         from app.ml.queue import ml_job_queue
         await ml_job_queue.add_job(
@@ -366,7 +447,8 @@ async def encode_photo(
             photo_id=photo_id,
             scan_faces=scan_faces,
             scan_tags=scan_tags,
-            scan_clip=scan_clip
+            scan_clip=scan_clip,
+            webapp_url=target_webapp,
         )
         return {"status": "queued", "photo_id": photo_id}
     else:
@@ -375,8 +457,44 @@ async def encode_photo(
             scan_faces=scan_faces,
             scan_tags=scan_tags,
             scan_clip=scan_clip,
-            db=db
+            db=db,
+            webapp_url=target_webapp,
         )
+
+
+@router.post("/encode-batch")
+async def encode_batch_photos(
+    photo_ids: list[int] = Form(...),
+    scan_faces: bool = Form(True),
+    scan_tags: bool = Form(True),
+    scan_clip: bool = Form(True),
+    webapp_url: str | None = Form(None),
+    x_webapp_url: str | None = Header(None, alias="X-Webapp-Url"),
+):
+    """Enqueues multiple photos in a single rapid request."""
+    from app.ml.queue import ml_job_queue
+    target_webapp = webapp_url or x_webapp_url
+    if target_webapp:
+        settings.set_dynamic_webapp_url(target_webapp)
+
+    queued_count = 0
+    for pid in photo_ids:
+        await ml_job_queue.add_job(
+            process_photo_pipeline_queued,
+            photo_id=pid,
+            scan_faces=scan_faces,
+            scan_tags=scan_tags,
+            scan_clip=scan_clip,
+            webapp_url=target_webapp,
+        )
+        queued_count += 1
+
+    return {
+        "status": "success",
+        "queued": queued_count,
+        "total": len(photo_ids),
+        "message": f"Queued {queued_count} photos for parallel background scanning.",
+    }
 
 
 # ── Search ──────────────────────────────────────────────────────

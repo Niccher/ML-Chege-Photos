@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic_settings import BaseSettings
 
+_ACTIVE_DYNAMIC_WEBAPP_URL: str | None = None
+
 
 class Settings(BaseSettings):
     # ── Database ────────────────────────────────────────────────
@@ -70,20 +72,56 @@ class Settings(BaseSettings):
     # ── Storage & Inter-service ─────────────────────────────────
     uploads_dir: str = "/app/uploads"
     webapp_url: str | None = None
+    ml_concurrent_workers: int = 4
+
+    def set_dynamic_webapp_url(self, url: str | None) -> None:
+        """Dynamically record the WebApp URL passed via request headers or body."""
+        global _ACTIVE_DYNAMIC_WEBAPP_URL
+        if not url:
+            return
+        clean = str(url).strip().rstrip("/")
+        if clean and not clean.startswith(("http://", "https://")):
+            clean = "https://" + clean
+        if clean:
+            _ACTIVE_DYNAMIC_WEBAPP_URL = clean
 
     @property
     def effective_webapp_url(self) -> str | None:
-        """Return the webapp URL to download photos from, with Railway auto-discovery."""
+        """Return the webapp URL to download photos from, with dynamic & Railway auto-discovery."""
         import os
-        if self.webapp_url:
-            return self.webapp_url.rstrip("/")
-        # Check explicit env var first
-        env_url = os.getenv("WEBAPP_URL") or os.getenv("RAILWAY_STATIC_URL")
-        if env_url:
-            return env_url.rstrip("/")
-        # Auto-detect: on Railway, fall back to known production URL
+        import socket
+
+        # 1. Dynamically learned URL from incoming request header/body (highest priority)
+        global _ACTIVE_DYNAMIC_WEBAPP_URL
+        if _ACTIVE_DYNAMIC_WEBAPP_URL:
+            return _ACTIVE_DYNAMIC_WEBAPP_URL
+
+        # 2. Explicit config or environment variable (supports Railway ${{...}} reference)
+        raw_url = self.webapp_url or os.getenv("WEBAPP_URL")
+        if raw_url:
+            clean = raw_url.strip().rstrip("/")
+            if not clean.startswith(("http://", "https://")):
+                clean = "https://" + clean
+            return clean
+
+        # 3. Railway private mesh DNS candidate discovery
         if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            candidates = [
+                "chege-photos-webapp.railway.internal",
+                "chege-photos-webapp",
+                "webapp.railway.internal",
+                "web.railway.internal",
+            ]
+            for host in candidates:
+                try:
+                    socket.getaddrinfo(host, 80)
+                    return f"http://{host}:80"
+                except Exception:
+                    pass
+
+            # 4. Fallback to default known production URL on Railway
             return "https://chege-photos-webapp-production.up.railway.app"
+
         return None
 
     # ── Qdrant ──────────────────────────────────────────────────

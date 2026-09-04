@@ -10,8 +10,11 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 
 
 @router.get("/health")
-def health_check():
+def health_check(x_webapp_url: str | None = Header(None, alias="X-Webapp-Url")):
     """Liveness / readiness check."""
+    if x_webapp_url:
+        from app.config import settings
+        settings.set_dynamic_webapp_url(x_webapp_url)
 
     # ── Database ────────────────────────────────────────────────
     db_ok = False
@@ -56,10 +59,20 @@ def health_check():
     # ── Job Queue ────────────────────────────────────────────────
     queue_size = 0
     is_processing = False
+    workers_count = 1
+    total_processed = 0
+    total_failed = 0
+    last_error = None
+    last_error_time = None
     try:
         from app.ml.queue import ml_job_queue
         queue_size = ml_job_queue.queue.qsize()
         is_processing = ml_job_queue.is_running and (queue_size > 0 or ml_job_queue._current_task is not None)
+        workers_count = len(ml_job_queue.worker_tasks) or ml_job_queue.num_workers
+        total_processed = ml_job_queue.total_processed
+        total_failed = ml_job_queue.total_failed
+        last_error = ml_job_queue.last_error
+        last_error_time = ml_job_queue.last_error_time
     except Exception:
         pass
 
@@ -72,6 +85,68 @@ def health_check():
         "yolo_loaded": yolo_ok,
         "queue_size": queue_size,
         "is_processing": is_processing,
+        "concurrent_workers": workers_count,
+        "total_processed": total_processed,
+        "total_failed": total_failed,
+        "last_error": last_error,
+        "last_error_time": last_error_time,
+    }
+
+
+@router.get("/health/diagnostics")
+def health_diagnostics(x_webapp_url: str | None = Header(None, alias="X-Webapp-Url")):
+    """Deep diagnostics endpoint: inspects failure reasons, photo reachability, and pipeline health."""
+    from app.config import settings
+    if x_webapp_url:
+        settings.set_dynamic_webapp_url(x_webapp_url)
+    from app.models.db import PhotoScan
+
+    recent_errors = []
+    try:
+        db = next(get_db())
+        failed_scans = db.query(PhotoScan).filter(
+            PhotoScan.status == "failed"
+        ).order_by(PhotoScan.completed_at.desc()).limit(15).all()
+
+        for s in failed_scans:
+            recent_errors.append({
+                "photo_id": s.photo_id,
+                "error": s.error_message,
+                "failed_at": str(s.completed_at) if s.completed_at else None,
+            })
+        db.close()
+    except Exception as exc:
+        recent_errors.append({"error": f"Failed to query failure logs: {exc}"})
+
+    # Test photo reachability probe
+    photo_access_test = {
+        "configured_webapp_url": settings.effective_webapp_url,
+        "accessible": False,
+        "status_code": None,
+        "message": None,
+    }
+    if settings.effective_webapp_url:
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                settings.effective_webapp_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ChegePhotosML/1.0)"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                photo_access_test["accessible"] = (resp.status == 200)
+                photo_access_test["status_code"] = resp.status
+                photo_access_test["message"] = "Connected successfully to WebApp"
+        except Exception as probe_err:
+            photo_access_test["message"] = str(probe_err)
+
+    return {
+        "status": "success",
+        "webapp_url": settings.effective_webapp_url,
+        "photo_access_test": photo_access_test,
+        "recent_errors": recent_errors,
+        "queue": {
+            "num_workers": settings.ml_concurrent_workers,
+        },
     }
 
 

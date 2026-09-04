@@ -54,23 +54,55 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
     if not photo:
         raise ValueError(f"Photo {photo_id} not found")
 
-    rel = photo.path.removeprefix("uploads/")
+    rel = photo.path.strip().lstrip("/").removeprefix("uploads/").lstrip("/")
     uploads_base = Path(settings.uploads_dir)
     photo_path = uploads_base / rel
 
-    if not photo_path.exists() and settings.effective_webapp_url:
+    # Download from WebApp if missing or empty on disk
+    if (not photo_path.exists() or photo_path.stat().st_size == 0) and settings.effective_webapp_url:
         import urllib.request
-        download_url = f"{settings.effective_webapp_url}/uploads/{rel}"
+
+        candidate_urls = [
+            f"{settings.effective_webapp_url}/uploads/{rel}",
+        ]
+        if "railway" in (settings.effective_webapp_url or "").lower():
+            candidate_urls.insert(0, f"http://chege-photos-webapp.railway.internal/uploads/{rel}")
+
+        photo_path.parent.mkdir(parents=True, exist_ok=True)
+        download_success = False
+        last_dl_error = None
+
+        for dl_url in candidate_urls:
+            try:
+                req = urllib.request.Request(
+                    dl_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ChegePhotosML/1.0)"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        content = resp.read()
+                        if len(content) > 100:  # Real image payload
+                            with open(photo_path, "wb") as f:
+                                f.write(content)
+                            download_success = True
+                            break
+            except Exception as dl_err:
+                last_dl_error = dl_err
+
+        if not download_success:
+            log.warning("Could not download photo %s from candidates %s: %s", photo_id, candidate_urls, last_dl_error)
+
+    if not photo_path.exists() or photo_path.stat().st_size == 0:
+        raise ValueError(f"Photo file not found or empty at {photo_path}")
+
+    try:
+        img = _read_photo(str(photo_path))
+    except Exception as img_err:
         try:
-            photo_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(download_url, str(photo_path))
-        except Exception as err:
-            log.warning("Could not download photo %s from %s: %s", photo_id, download_url, err)
-
-    if not photo_path.exists():
-        raise ValueError(f"Photo file not found at {photo_path}")
-
-    img = _read_photo(str(photo_path))
+            photo_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise ValueError(f"Could not read photo file at {photo_path}: {img_err}")
     faces = model.get(img)
 
     qdrant = get_qdrant()
@@ -192,6 +224,17 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
         except Exception as retry_exc:
             log.error("Object detection retry failed for photo %d: %s", photo_id, retry_exc)
 
+    # Mark photo as fully scanned in tbl_photos
+    try:
+        from app.config import settings as _cfg
+        _db_schema = _cfg.effective_db_name
+        db.execute(
+            text(f"UPDATE `{_db_schema}`.tbl_photos SET scanned_face = 1, scanned_tag = 1, scanned_clip = 1 WHERE id = :pid"),
+            {"pid": photo_id}
+        )
+    except Exception as upd_err:
+        log.warning("Could not update scanned flags in tbl_photos for photo %d: %s", photo_id, upd_err)
+
     db.commit()
     return {"face_count": len(results), "faces": results}
 
@@ -208,6 +251,7 @@ def scan_photo(photo_id: int) -> PhotoScan:
 
         scan.status = "processing"
         scan.started_at = datetime.now(timezone.utc)
+        scan.error_message = None
         db.commit()
 
         result = process_single_photo(photo_id, db)
@@ -215,6 +259,7 @@ def scan_photo(photo_id: int) -> PhotoScan:
         scan.status = "completed"
         scan.face_count = result["face_count"]
         scan.completed_at = datetime.now(timezone.utc)
+        scan.error_message = None
         db.commit()
 
         return scan
@@ -240,7 +285,7 @@ def create_scan_job(photo_ids: Optional[list[int]] = None) -> ScanJob:
             from app.config import settings as _cfg
             _db_schema = _cfg.effective_db_name
             total = db.execute(
-                text(f"SELECT COUNT(*) FROM `{_db_schema}`.tbl_photos WHERE type = 'image' AND deleted_at IS NULL")
+                text(f"SELECT COUNT(*) FROM `{_db_schema}`.tbl_photos WHERE (mime_type LIKE 'image/%' OR mime_type IS NULL) AND deleted_at IS NULL")
             ).scalar()
 
         job = ScanJob(status="pending", total_photos=total)
@@ -267,7 +312,7 @@ def run_scan_job(job_id: int):
             from app.config import settings as _cfg
             _db_schema = _cfg.effective_db_name
             photos = db.execute(
-                text(f"SELECT id FROM `{_db_schema}`.tbl_photos WHERE type = 'image' AND deleted_at IS NULL ORDER BY id")
+                text(f"SELECT id FROM `{_db_schema}`.tbl_photos WHERE (mime_type LIKE 'image/%' OR mime_type IS NULL) AND deleted_at IS NULL ORDER BY id")
             ).fetchall()
 
             for row in photos:
@@ -303,11 +348,12 @@ def run_scan_job(job_id: int):
             db.close()
 
 
-def cleanup_stale_scans(max_age_sec: int = 300):
+def cleanup_stale_scans(max_age_sec: int = 300) -> dict:
     db = next(get_db())
+    reaped_scans = 0
+    reaped_jobs = 0
     try:
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None)
-        from sqlalchemy import func as sa_func
         stale = db.query(PhotoScan).filter(
             PhotoScan.status == "processing",
             PhotoScan.started_at.isnot(None),
@@ -318,6 +364,7 @@ def cleanup_stale_scans(max_age_sec: int = 300):
                 s.status = "failed"
                 s.error_message = "Stale — timed out after %ds" % max_age_sec
                 s.completed_at = cutoff
+                reaped_scans += 1
                 log.warning("Marked stale PhotoScan %d for photo %d", s.id, s.photo_id)
         db.commit()
 
@@ -331,7 +378,9 @@ def cleanup_stale_scans(max_age_sec: int = 300):
                 j.status = "failed"
                 j.error_message = "Stale — timed out after %ds" % max_age_sec
                 j.completed_at = cutoff
+                reaped_jobs += 1
                 log.warning("Marked stale ScanJob %d", j.id)
         db.commit()
+        return {"reaped_scans": reaped_scans, "reaped_jobs": reaped_jobs}
     finally:
         db.close()
