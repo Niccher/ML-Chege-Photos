@@ -108,7 +108,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(health_router, dependencies=[Depends(get_api_key)])
+@app.get("/health", tags=["health"])
+def root_health():
+    return {"status": "ok", "service": "ML Chege Photos"}
+
+
+@app.get("/", tags=["health"])
+def root_index():
+    return {"status": "ok", "service": "ML Chege Photos", "version": "0.2.0"}
+
+
+app.include_router(health_router)
 app.include_router(faces_router, dependencies=[Depends(get_api_key)])
 app.include_router(scan_router, dependencies=[Depends(get_api_key)])
 app.include_router(clusters_router, dependencies=[Depends(get_api_key)])

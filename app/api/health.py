@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException, status
 from sqlalchemy import text
 
 from app.database import get_db, get_qdrant
@@ -70,9 +70,15 @@ def reload_models_endpoint(
     clip_model_name: str | None = None,
     object_det_threshold: float | None = None,
     include_sensitive: str | bool | None = None,
+    x_api_key: str | None = Header(None, alias="X-API-KEY"),
 ):
     """Reload models and configurations dynamically."""
     from app.config import settings
+    if x_api_key != settings.ml_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Invalid or missing X-API-KEY credential header",
+        )
     from app.ml.loader import load_models
     from app.ml.semantic_search import load_clip_model
 
