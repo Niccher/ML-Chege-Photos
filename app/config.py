@@ -71,6 +71,21 @@ class Settings(BaseSettings):
     uploads_dir: str = "/app/uploads"
     webapp_url: str | None = None
 
+    @property
+    def effective_webapp_url(self) -> str | None:
+        """Return the webapp URL to download photos from, with Railway auto-discovery."""
+        import os
+        if self.webapp_url:
+            return self.webapp_url.rstrip("/")
+        # Check explicit env var first
+        env_url = os.getenv("WEBAPP_URL") or os.getenv("RAILWAY_STATIC_URL")
+        if env_url:
+            return env_url.rstrip("/")
+        # Auto-detect: on Railway, fall back to known production URL
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            return "https://chege-photos-webapp-production.up.railway.app"
+        return None
+
     # ── Qdrant ──────────────────────────────────────────────────
     qdrant_host: str = "qdrant"
     qdrant_port: int = 6333

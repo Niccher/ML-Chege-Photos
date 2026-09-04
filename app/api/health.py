@@ -53,6 +53,16 @@ def health_check():
 
     overall = db_ok and qdrant_ok
 
+    # ── Job Queue ────────────────────────────────────────────────
+    queue_size = 0
+    is_processing = False
+    try:
+        from app.ml.queue import ml_job_queue
+        queue_size = ml_job_queue.queue.qsize()
+        is_processing = ml_job_queue.is_running and (queue_size > 0 or ml_job_queue._current_task is not None)
+    except Exception:
+        pass
+
     return {
         "status": "healthy" if overall else "degraded",
         "db_connected": db_ok,
@@ -60,6 +70,8 @@ def health_check():
         "models_loaded": models_loaded,
         "clip_loaded": clip_ok,
         "yolo_loaded": yolo_ok,
+        "queue_size": queue_size,
+        "is_processing": is_processing,
     }
 
 

@@ -124,8 +124,10 @@ def process_photo_pipeline_sync(
 ) -> dict:
     model = _require_models()
 
+    from app.config import settings as _cfg
+    _db_schema = _cfg.effective_db_name
     photo = db.execute(
-        text("SELECT id, path, user_id FROM db_chege_photos.tbl_photos WHERE id = :pid"),
+        text(f"SELECT id, path, user_id FROM `{_db_schema}`.tbl_photos WHERE id = :pid"),
         {"pid": photo_id},
     ).fetchone()
     if not photo:
@@ -135,9 +137,9 @@ def process_photo_pipeline_sync(
     rel = photo.path.removeprefix("uploads/")
     uploads_base = Path(settings.uploads_dir)
     photo_path = uploads_base / rel
-    if not photo_path.exists() and settings.webapp_url:
+    if not photo_path.exists() and settings.effective_webapp_url:
         import urllib.request
-        download_url = f"{settings.webapp_url.rstrip('/')}/uploads/{rel}"
+        download_url = f"{settings.effective_webapp_url}/uploads/{rel}"
         try:
             photo_path.parent.mkdir(parents=True, exist_ok=True)
             urllib.request.urlretrieve(download_url, str(photo_path))
@@ -278,7 +280,7 @@ def process_photo_pipeline_sync(
                     log.warning(f"Could not delete point {old_fe.qdrant_point_id} from Qdrant: {q_exc}")
 
         db.execute(
-            text("UPDATE db_chege_photos.tbl_photos SET scanned_face = 1 WHERE id = :pid"),
+            text(f"UPDATE `{_db_schema}`.tbl_photos SET scanned_face = 1 WHERE id = :pid"),
             {"pid": photo_id}
         )
 
@@ -297,7 +299,7 @@ def process_photo_pipeline_sync(
                 )
                 db.add(pt)
             db.execute(
-                text("UPDATE db_chege_photos.tbl_photos SET scanned_tag = 1 WHERE id = :pid"),
+                text(f"UPDATE `{_db_schema}`.tbl_photos SET scanned_tag = 1 WHERE id = :pid"),
                 {"pid": photo_id}
             )
         except Exception as exc:
@@ -321,7 +323,7 @@ def process_photo_pipeline_sync(
                 )]
             )
             db.execute(
-                text("UPDATE db_chege_photos.tbl_photos SET scanned_clip = 1 WHERE id = :pid"),
+                text(f"UPDATE `{_db_schema}`.tbl_photos SET scanned_clip = 1 WHERE id = :pid"),
                 {"pid": photo_id}
             )
         except Exception as exc:

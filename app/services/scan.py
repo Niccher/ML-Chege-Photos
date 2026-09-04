@@ -45,8 +45,10 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
     ensure_all_models_ready()
     model = _require_models()
 
+    from app.config import settings as _cfg
+    _db_schema = _cfg.effective_db_name
     photo = db.execute(
-        text("SELECT id, path FROM db_chege_photos.tbl_photos WHERE id = :pid"),
+        text(f"SELECT id, path FROM `{_db_schema}`.tbl_photos WHERE id = :pid"),
         {"pid": photo_id},
     ).fetchone()
     if not photo:
@@ -56,9 +58,9 @@ def process_single_photo(photo_id: int, db: Session) -> dict:
     uploads_base = Path(settings.uploads_dir)
     photo_path = uploads_base / rel
 
-    if not photo_path.exists() and settings.webapp_url:
+    if not photo_path.exists() and settings.effective_webapp_url:
         import urllib.request
-        download_url = f"{settings.webapp_url.rstrip('/')}/uploads/{rel}"
+        download_url = f"{settings.effective_webapp_url}/uploads/{rel}"
         try:
             photo_path.parent.mkdir(parents=True, exist_ok=True)
             urllib.request.urlretrieve(download_url, str(photo_path))
@@ -235,8 +237,10 @@ def create_scan_job(photo_ids: Optional[list[int]] = None) -> ScanJob:
         if photo_ids:
             total = len(photo_ids)
         else:
+            from app.config import settings as _cfg
+            _db_schema = _cfg.effective_db_name
             total = db.execute(
-                text("SELECT COUNT(*) FROM db_chege_photos.tbl_photos WHERE type = 'image' AND deleted_at IS NULL")
+                text(f"SELECT COUNT(*) FROM `{_db_schema}`.tbl_photos WHERE type = 'image' AND deleted_at IS NULL")
             ).scalar()
 
         job = ScanJob(status="pending", total_photos=total)
@@ -260,8 +264,10 @@ def run_scan_job(job_id: int):
             job.status = "processing"
             db.commit()
 
+            from app.config import settings as _cfg
+            _db_schema = _cfg.effective_db_name
             photos = db.execute(
-                text("SELECT id FROM db_chege_photos.tbl_photos WHERE type = 'image' AND deleted_at IS NULL ORDER BY id")
+                text(f"SELECT id FROM `{_db_schema}`.tbl_photos WHERE type = 'image' AND deleted_at IS NULL ORDER BY id")
             ).fetchall()
 
             for row in photos:
