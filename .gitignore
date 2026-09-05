@@ -1,9 +1,11 @@
-# Python caches
+# Python caches & bytecode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
 
@@ -12,12 +14,21 @@ htmlcov/
 .env.*
 !.env.example
 
-# Models & Weights
-models/insightface_models/
-models/
+# Root models & weights (prefixed with / to protect app/models/)
+/models/
+/insightface_models/
 huggingface/
 .huggingface/
 .cache/
+
+# Large model weight binaries
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+*.engine
+*.tflite
 
 # Databases & Vector DB storage
 .qdrant_storage/
@@ -32,6 +43,14 @@ ENV/
 *.egg-info/
 /wheels/
 
-# OS Files
+# Logs
+*.log
+
+# IDE, OS, and Temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
