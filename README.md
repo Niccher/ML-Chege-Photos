@@ -108,6 +108,32 @@ For architecture, database schemas, API contracts, and development workflows, se
 
 ---
 
+## Ecosystem & Multi-Repo Architecture
+
+The Chege Photos platform consists of three coordinated repositories:
+
+```
+[ Android Companion App ]
+         │
+         │ (HTTPS / Bearer Token - port 9005)
+         ▼
+[ Chege Photos WebApp ] (Port 9005) ─── MySQL 8.4 (Port 9306)
+         │
+         │ (Internal HTTP / X-API-KEY - port 9051)
+         ▼
+[ ML Chege Photos ] (Port 9051) ─────── Qdrant Vector DB (Port 9052)
+```
+
+### Integration Points
+1. **Network & Storage**:
+   - The ML service connects to the `hosts-shared-network` created by the WebApp stack.
+   - It reads image files mounted from the WebApp's `uploads/` volume, or hydrates missing images dynamically via the WebApp URL (`X-Webapp-Url`).
+2. **Mobile Independence**:
+   - The Android companion client connects strictly to the WebApp (never directly to the ML container).
+   - The WebApp invokes ML endpoints (face clustering, YOLO tagging, CLIP similarity) asynchronously and returns results to Android.
+
+---
+
 ## Sibling Repositories
 
 | Repository | Responsibility | Tech Stack |
