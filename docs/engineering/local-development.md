@@ -17,7 +17,7 @@ This guide walks through configuring a local Python development environment for 
 
 ### Clone Repository & Create Virtual Environment
 ```bash
-cd "/home/niccher/Music/hosts/ML Chege Photos"
+cd path/to/ML_Chege_Photos
 python3.12 -m venv .venv
 source .venv/bin/activate
 ```

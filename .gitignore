@@ -46,6 +46,9 @@ ENV/
 # Logs
 *.log
 
+# Agent and AI assistant configurations & skills
+.agents/
+
 # IDE, OS, and Temporary files
 .idea/
 .vscode/
